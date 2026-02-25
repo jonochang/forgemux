@@ -11,3 +11,6 @@ tracing-subscriber.workspace = true
 
 [dependencies.forgemux-core]
 path = "../forgemux-core"
+
+[dependencies.forged]
+path = "../forged"

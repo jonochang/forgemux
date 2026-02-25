@@ -1,4 +1,5 @@
 use chrono::{DateTime, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,12 @@ impl std::fmt::Display for SessionId {
 impl AsRef<str> for SessionId {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
     }
 }
 
@@ -174,6 +181,61 @@ impl RepoRoot {
 }
 
 #[derive(Debug, Clone)]
+pub struct StateDetector {
+    idle_threshold_secs: i64,
+    waiting_threshold_secs: i64,
+    prompt_patterns: Vec<Regex>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StateSignal {
+    pub process_alive: bool,
+    pub exit_code: Option<i32>,
+    pub last_output_at: DateTime<Utc>,
+    pub recent_output: String,
+}
+
+impl StateDetector {
+    pub fn new(
+        idle_threshold_secs: i64,
+        waiting_threshold_secs: i64,
+        prompt_patterns: Vec<Regex>,
+    ) -> Self {
+        Self {
+            idle_threshold_secs,
+            waiting_threshold_secs,
+            prompt_patterns,
+        }
+    }
+
+    pub fn detect(&self, now: DateTime<Utc>, signal: &StateSignal) -> SessionState {
+        if !signal.process_alive {
+            return match signal.exit_code {
+                Some(code) if code == 0 => SessionState::Terminated,
+                Some(_) => SessionState::Errored,
+                None => SessionState::Errored,
+            };
+        }
+
+        let idle_secs = (now - signal.last_output_at).num_seconds();
+        let waiting_prompt = self
+            .prompt_patterns
+            .iter()
+            .any(|pat| pat.is_match(&signal.recent_output));
+
+        if waiting_prompt && idle_secs >= self.waiting_threshold_secs {
+            return SessionState::WaitingInput;
+        }
+
+        if idle_secs >= self.idle_threshold_secs {
+            return SessionState::Idle;
+        }
+
+        SessionState::Running
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct SessionManager {
     store: SessionStore,
 }
@@ -196,6 +258,28 @@ impl SessionManager {
         let record = SessionRecord::new(agent, model, repo_root);
         self.store.save(&record)?;
         Ok(record)
+    }
+}
+
+pub fn sort_sessions(mut sessions: Vec<SessionRecord>) -> Vec<SessionRecord> {
+    sessions.sort_by(|a, b| {
+        let pa = state_priority(&a.state);
+        let pb = state_priority(&b.state);
+        pa.cmp(&pb)
+            .then_with(|| b.last_activity_at.cmp(&a.last_activity_at))
+    });
+    sessions
+}
+
+fn state_priority(state: &SessionState) -> u8 {
+    match state {
+        SessionState::WaitingInput => 0,
+        SessionState::Running => 1,
+        SessionState::Idle => 2,
+        SessionState::Errored => 3,
+        SessionState::Terminated => 4,
+        SessionState::Provisioning => 5,
+        SessionState::Starting => 6,
     }
 }
 
@@ -327,5 +411,85 @@ mod tests {
             .unwrap();
         assert!(status.success());
 
+    }
+
+    #[test]
+    fn state_detector_marks_waiting_input() {
+        let detector = StateDetector::new(
+            60,
+            10,
+            vec![Regex::new(r\"(?m)^>\\s*$\").unwrap()],
+        );
+        let signal = StateSignal {
+            process_alive: true,
+            exit_code: None,
+            last_output_at: Utc::now() - chrono::Duration::seconds(15),
+            recent_output: \">\".to_string(),
+        };
+        let state = detector.detect(Utc::now(), &signal);
+        assert_eq!(state, SessionState::WaitingInput);
+    }
+
+    #[test]
+    fn state_detector_marks_idle() {
+        let detector = StateDetector::new(30, 10, vec![]);
+        let signal = StateSignal {
+            process_alive: true,
+            exit_code: None,
+            last_output_at: Utc::now() - chrono::Duration::seconds(45),
+            recent_output: \"\".to_string(),
+        };
+        let state = detector.detect(Utc::now(), &signal);
+        assert_eq!(state, SessionState::Idle);
+    }
+
+    #[test]
+    fn state_detector_marks_running() {
+        let detector = StateDetector::new(30, 10, vec![]);
+        let signal = StateSignal {
+            process_alive: true,
+            exit_code: None,
+            last_output_at: Utc::now() - chrono::Duration::seconds(5),
+            recent_output: \"\".to_string(),
+        };
+        let state = detector.detect(Utc::now(), &signal);
+        assert_eq!(state, SessionState::Running);
+    }
+
+    #[test]
+    fn state_detector_marks_errored() {
+        let detector = StateDetector::new(30, 10, vec![]);
+        let signal = StateSignal {
+            process_alive: false,
+            exit_code: Some(1),
+            last_output_at: Utc::now(),
+            recent_output: \"\".to_string(),
+        };
+        let state = detector.detect(Utc::now(), &signal);
+        assert_eq!(state, SessionState::Errored);
+    }
+
+    #[test]
+    fn sort_sessions_prioritizes_waiting_input() {
+        let now = Utc::now();
+        let mut waiting = SessionRecord::new(
+            AgentType::Claude,
+            "sonnet",
+            PathBuf::from("/tmp"),
+        );
+        waiting.state = SessionState::WaitingInput;
+        waiting.last_activity_at = now - chrono::Duration::seconds(300);
+
+        let mut running = SessionRecord::new(
+            AgentType::Claude,
+            "sonnet",
+            PathBuf::from("/tmp"),
+        );
+        running.state = SessionState::Running;
+        running.last_activity_at = now;
+
+        let sorted = sort_sessions(vec![running.clone(), waiting.clone()]);
+        assert_eq!(sorted[0].state, SessionState::WaitingInput);
+        assert_eq!(sorted[1].state, SessionState::Running);
     }
 }

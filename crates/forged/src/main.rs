@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use forgemux_core::SessionStore;
+use forged::{ForgedConfig, OsCommandRunner, SessionService};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -27,18 +27,19 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let store = SessionStore::new(cli.data_dir);
+    let config = ForgedConfig::default_with_data_dir(cli.data_dir);
+    let service = SessionService::new(config, OsCommandRunner);
 
     match cli.command {
         Command::Run => {
             println!("forged run: not implemented yet");
         }
         Command::Check => {
-            store.ensure_dirs()?;
+            service.list_sessions()?;
             println!("ok");
         }
         Command::Sessions => {
-            let sessions = store.list()?;
+            let sessions = service.refresh_states()?;
             if sessions.is_empty() {
                 println!("no sessions");
             } else {
