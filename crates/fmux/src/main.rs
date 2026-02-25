@@ -289,7 +289,7 @@ fn main() {
         }
         Command::Logs {
             session_id,
-            tail,
+            tail: _tail,
             follow,
         } => {
             if !follow {

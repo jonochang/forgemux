@@ -9,7 +9,7 @@ use forgemux_core::AgentType;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct StartRequest {
     pub agent: String,
     pub model: String,
@@ -19,12 +19,12 @@ pub struct StartRequest {
     pub worktree_path: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct StartResponse {
     pub session_id: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
