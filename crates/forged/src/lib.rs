@@ -32,12 +32,28 @@ pub struct AgentConfig {
 }
 
 #[derive(Debug, Clone)]
+pub enum NotificationHook {
+    Desktop,
+    Webhook { url: String, template: String },
+    Command { program: String, args: Vec<String> },
+}
+
+#[derive(Debug, Clone)]
+pub struct NotificationConfig {
+    pub on_waiting_input: Vec<NotificationHook>,
+    pub on_error: Vec<NotificationHook>,
+    pub on_idle_timeout: Vec<NotificationHook>,
+    pub debounce_secs: i64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ForgedConfig {
     pub data_dir: PathBuf,
     pub tmux_bin: String,
     pub idle_threshold_secs: i64,
     pub waiting_threshold_secs: i64,
     pub agents: HashMap<AgentType, AgentConfig>,
+    pub notifications: NotificationConfig,
 }
 
 impl ForgedConfig {
@@ -66,6 +82,12 @@ impl ForgedConfig {
             idle_threshold_secs: 60,
             waiting_threshold_secs: 15,
             agents,
+            notifications: NotificationConfig {
+                on_waiting_input: Vec::new(),
+                on_error: Vec::new(),
+                on_idle_timeout: Vec::new(),
+                debounce_secs: 300,
+            },
         }
     }
 }
@@ -75,6 +97,7 @@ pub struct SessionService<R: CommandRunner> {
     runner: R,
     store: SessionStore,
     manager: SessionManager,
+    notifier: NotificationEngine,
 }
 
 impl<R: CommandRunner> SessionService<R> {
@@ -86,6 +109,7 @@ impl<R: CommandRunner> SessionService<R> {
             runner,
             store,
             manager,
+            notifier: NotificationEngine::new(),
         }
     }
 
@@ -162,6 +186,12 @@ impl<R: CommandRunner> SessionService<R> {
             };
             let state = detector.detect(Utc::now(), &signal);
             if state != session.state {
+                self.notifier.maybe_notify(
+                    &self.config.notifications,
+                    &self.runner,
+                    &session,
+                    &state,
+                );
                 session.touch_state(state);
                 self.store.save(&session)?;
             }
@@ -302,6 +332,109 @@ fn system_time_to_chrono(time: SystemTime) -> DateTime<Utc> {
     DateTime::<Utc>::from(time)
 }
 
+#[derive(Default)]
+pub struct NotificationEngine {
+    last_fired: std::sync::Mutex<HashMap<(String, NotificationEvent), DateTime<Utc>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NotificationEvent {
+    WaitingInput,
+    Errored,
+    IdleTimeout,
+}
+
+impl NotificationEngine {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn maybe_notify<R: CommandRunner>(
+        &self,
+        config: &NotificationConfig,
+        runner: &R,
+        session: &SessionRecord,
+        new_state: &SessionState,
+    ) {
+        let event = match new_state {
+            SessionState::WaitingInput => Some(NotificationEvent::WaitingInput),
+            SessionState::Errored => Some(NotificationEvent::Errored),
+            SessionState::Terminated => Some(NotificationEvent::IdleTimeout),
+            _ => None,
+        };
+        let Some(event) = event else { return; };
+
+        if !self.should_fire(session, event, config.debounce_secs) {
+            return;
+        }
+
+        let hooks = match event {
+            NotificationEvent::WaitingInput => &config.on_waiting_input,
+            NotificationEvent::Errored => &config.on_error,
+            NotificationEvent::IdleTimeout => &config.on_idle_timeout,
+        };
+
+        for hook in hooks {
+            let _ = send_hook(runner, hook, session, event);
+        }
+    }
+
+    fn should_fire(&self, session: &SessionRecord, event: NotificationEvent, debounce: i64) -> bool {
+        let now = Utc::now();
+        let key = (session.id.as_str().to_string(), event);
+        let mut guard = self.last_fired.lock().unwrap();
+        if let Some(last) = guard.get(&key) {
+            if (now - *last).num_seconds() < debounce {
+                return false;
+            }
+        }
+        guard.insert(key, now);
+        true
+    }
+}
+
+fn send_hook<R: CommandRunner>(
+    runner: &R,
+    hook: &NotificationHook,
+    session: &SessionRecord,
+    event: NotificationEvent,
+) -> anyhow::Result<()> {
+    let message = render_template(
+        "Session {{session_id}} is {{state}}",
+        session,
+        event,
+    );
+    match hook {
+        NotificationHook::Desktop => {
+            let args = vec!["-a".to_string(), "forgemux".to_string(), message];
+            let _ = runner.run("notify-send", &args)?;
+        }
+        NotificationHook::Command { program, args } => {
+            let rendered = args
+                .iter()
+                .map(|arg| render_template(arg, session, event))
+                .collect::<Vec<_>>();
+            let _ = runner.run(program, &rendered)?;
+        }
+        NotificationHook::Webhook { url: _, template: _ } => {
+            // Webhook integration deferred to async notifier.
+        }
+    }
+    Ok(())
+}
+
+fn render_template(template: &str, session: &SessionRecord, event: NotificationEvent) -> String {
+    let state = match event {
+        NotificationEvent::WaitingInput => "waiting",
+        NotificationEvent::Errored => "errored",
+        NotificationEvent::IdleTimeout => "terminated",
+    };
+    template
+        .replace("{{session_id}}", session.id.as_str())
+        .replace("{{state}}", state)
+        .replace("{{agent}}", &format!("{:?}", session.agent))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,5 +506,47 @@ mod tests {
         let sessions = service.list_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].state, SessionState::Errored);
+    }
+
+    #[test]
+    fn notification_engine_debounces() {
+        let engine = NotificationEngine::new();
+        let mut record = SessionRecord::new(
+            AgentType::Claude,
+            "sonnet",
+            PathBuf::from("/tmp"),
+        );
+        record.id = forgemux_core::SessionId::from("S-0001");
+
+        let config = NotificationConfig {
+            on_waiting_input: vec![NotificationHook::Desktop],
+            on_error: vec![],
+            on_idle_timeout: vec![],
+            debounce_secs: 60,
+        };
+
+        let runner = FakeRunner::default();
+        engine.maybe_notify(&config, &runner, &record, &SessionState::WaitingInput);
+        engine.maybe_notify(&config, &runner, &record, &SessionState::WaitingInput);
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn render_template_expands_session_values() {
+        let record = SessionRecord::new(
+            AgentType::Codex,
+            "o3",
+            PathBuf::from("/tmp"),
+        );
+        let rendered = render_template(
+            "id={{session_id}} state={{state}} agent={{agent}}",
+            &record,
+            NotificationEvent::Errored,
+        );
+        assert!(rendered.contains(record.id.as_str()));
+        assert!(rendered.contains("errored"));
+        assert!(rendered.contains("Codex"));
     }
 }
