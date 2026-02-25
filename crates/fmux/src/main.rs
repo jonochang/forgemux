@@ -24,6 +24,8 @@ enum Command {
         model: String,
         #[arg(long, default_value = ".")]
         repo: String,
+        #[arg(long)]
+        notify: bool,
     },
     Attach {
         session_id: String,
@@ -48,6 +50,10 @@ enum Command {
         #[arg(long)]
         follow: bool,
     },
+    Watch {
+        #[arg(long, default_value_t = 5)]
+        interval: u64,
+    },
     Version,
 }
 
@@ -61,7 +67,15 @@ fn main() {
     let service = SessionService::new(config, OsCommandRunner);
 
     match cli.command {
-        Command::Start { agent, model, repo } => {
+        Command::Start {
+            agent,
+            model,
+            repo,
+            notify,
+        } => {
+            if notify {
+                eprintln!("warning: --notify requires forged daemon support; falling back to no-op");
+            }
             let agent = match agent.as_str() {
                 "claude" => AgentType::Claude,
                 "codex" => AgentType::Codex,
@@ -160,6 +174,16 @@ fn main() {
                 }
             }
         }
+        Command::Watch { interval } => loop {
+            match service.refresh_states() {
+                Ok(sessions) => print_sessions(sessions),
+                Err(err) => {
+                    eprintln!("watch failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+            thread::sleep(Duration::from_secs(interval));
+        },
         Command::Version => {
             println!("fmux 0.1.0");
         }
