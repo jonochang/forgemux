@@ -7,8 +7,10 @@ use std::path::PathBuf;
 #[command(name = "forged")]
 #[command(about = "Forgemux edge daemon", long_about = None)]
 struct Cli {
-    #[arg(long, default_value = "./.forgemux")]
-    data_dir: PathBuf,
+    #[arg(long)]
+    data_dir: Option<PathBuf>,
+    #[arg(long, default_value = "/etc/forgemux/forged.toml")]
+    config: PathBuf,
     #[arg(long, default_value = "127.0.0.1:9090")]
     bind: String,
     #[command(subcommand)]
@@ -30,7 +32,18 @@ fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let config = ForgedConfig::default_with_data_dir(cli.data_dir);
+    let mut config = if cli.config.exists() {
+        ForgedConfig::load(&cli.config)?
+    } else {
+        let data_dir = cli
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("./.forgemux"));
+        ForgedConfig::default_with_data_dir(data_dir)
+    };
+    if let Some(data_dir) = cli.data_dir {
+        config.data_dir = data_dir;
+    }
     let service = SessionService::new(config, OsCommandRunner);
 
     match cli.command {

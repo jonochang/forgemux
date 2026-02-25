@@ -126,6 +126,121 @@ impl ForgedConfig {
             },
         }
     }
+
+    pub fn load(path: impl AsRef<Path>) -> anyhow::Result<Self> {
+        let data = fs::read_to_string(path)?;
+        let file: ForgedConfigFile = toml::from_str(&data)?;
+        let data_dir = file
+            .data_dir
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("./.forgemux"));
+        let mut config = Self::default_with_data_dir(data_dir);
+
+        if let Some(tmux_bin) = file.tmux_bin {
+            config.tmux_bin = tmux_bin;
+        }
+        if let Some(idle_threshold_secs) = file.idle_threshold_secs {
+            config.idle_threshold_secs = idle_threshold_secs;
+        }
+        if let Some(waiting_threshold_secs) = file.waiting_threshold_secs {
+            config.waiting_threshold_secs = waiting_threshold_secs;
+        }
+        if let Some(agents) = file.agents {
+            for (name, agent) in agents {
+                let agent_type = match name.as_str() {
+                    "claude" => AgentType::Claude,
+                    "codex" => AgentType::Codex,
+                    _ => anyhow::bail!("unknown agent in config: {}", name),
+                };
+                let entry = config
+                    .agents
+                    .get_mut(&agent_type)
+                    .expect("default agent config missing");
+                if let Some(command) = agent.command {
+                    entry.command = command;
+                }
+                if let Some(args) = agent.args {
+                    entry.args = args;
+                }
+                if let Some(prompt_patterns) = agent.prompt_patterns {
+                    entry.prompt_patterns = prompt_patterns;
+                }
+            }
+        }
+        if let Some(notifications) = file.notifications {
+            config.notifications = notifications.into();
+        }
+        Ok(config)
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ForgedConfigFile {
+    pub data_dir: Option<PathBuf>,
+    pub tmux_bin: Option<String>,
+    pub idle_threshold_secs: Option<i64>,
+    pub waiting_threshold_secs: Option<i64>,
+    pub agents: Option<HashMap<String, AgentFile>>,
+    pub notifications: Option<NotificationConfigFile>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AgentFile {
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub prompt_patterns: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct NotificationConfigFile {
+    pub on_waiting_input: Option<Vec<NotificationHookFile>>,
+    pub on_error: Option<Vec<NotificationHookFile>>,
+    pub on_idle_timeout: Option<Vec<NotificationHookFile>>,
+    pub debounce_secs: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum NotificationHookFile {
+    Desktop,
+    Webhook {
+        url: String,
+        template: Option<String>,
+    },
+    Command {
+        program: String,
+        args: Option<Vec<String>>,
+    },
+}
+
+impl From<NotificationConfigFile> for NotificationConfig {
+    fn from(file: NotificationConfigFile) -> Self {
+        Self {
+            on_waiting_input: convert_hooks(file.on_waiting_input),
+            on_error: convert_hooks(file.on_error),
+            on_idle_timeout: convert_hooks(file.on_idle_timeout),
+            debounce_secs: file.debounce_secs.unwrap_or(300),
+        }
+    }
+}
+
+fn convert_hooks(hooks: Option<Vec<NotificationHookFile>>) -> Vec<NotificationHook> {
+    hooks
+        .unwrap_or_default()
+        .into_iter()
+        .map(|hook| match hook {
+            NotificationHookFile::Desktop => NotificationHook::Desktop,
+            NotificationHookFile::Webhook { url, template } => NotificationHook::Webhook {
+                url,
+                template: template
+                    .unwrap_or_else(|| "Session {{session_id}} is {{state}}".to_string()),
+            },
+            NotificationHookFile::Command { program, args } => NotificationHook::Command {
+                program,
+                args: args.unwrap_or_default(),
+            },
+        })
+        .collect()
 }
 
 pub struct SessionService<R: CommandRunner> {
@@ -794,5 +909,60 @@ mod tests {
 
         let calls = runner.calls();
         assert!(calls.iter().any(|call| call.contains(&"send-keys".to_string())));
+    }
+
+    #[test]
+    fn load_config_overrides_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("forged.toml");
+        let contents = r#"
+data_dir = "/tmp/forgemux-data"
+tmux_bin = "tmux-custom"
+idle_threshold_secs = 120
+waiting_threshold_secs = 25
+
+[agents.claude]
+command = "claude-custom"
+args = ["--model", "haiku"]
+prompt_patterns = ["(?m)^>$"]
+
+[notifications]
+debounce_secs = 42
+
+[[notifications.on_waiting_input]]
+kind = "desktop"
+
+[[notifications.on_error]]
+kind = "command"
+program = "echo"
+args = ["session={{session_id}}"]
+"#;
+        std::fs::write(&config_path, contents).unwrap();
+
+        let config = ForgedConfig::load(&config_path).unwrap();
+        assert_eq!(config.data_dir, PathBuf::from("/tmp/forgemux-data"));
+        assert_eq!(config.tmux_bin, "tmux-custom");
+        assert_eq!(config.idle_threshold_secs, 120);
+        assert_eq!(config.waiting_threshold_secs, 25);
+        let claude = config.agents.get(&AgentType::Claude).unwrap();
+        assert_eq!(claude.command, "claude-custom");
+        assert_eq!(claude.args, vec!["--model".to_string(), "haiku".to_string()]);
+        assert_eq!(claude.prompt_patterns, vec!["(?m)^>$".to_string()]);
+        assert_eq!(config.notifications.debounce_secs, 42);
+        assert_eq!(config.notifications.on_waiting_input.len(), 1);
+        assert_eq!(config.notifications.on_error.len(), 1);
+    }
+
+    #[test]
+    fn load_config_rejects_unknown_agent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("forged.toml");
+        let contents = r#"
+[agents.unknown]
+command = "bad"
+"#;
+        std::fs::write(&config_path, contents).unwrap();
+        let err = ForgedConfig::load(&config_path).unwrap_err();
+        assert!(err.to_string().contains("unknown agent"));
     }
 }
