@@ -93,10 +93,12 @@ mod tests {
                 HubEdge {
                     id: "edge1".to_string(),
                     data_dir: edge1,
+                    ws_url: None,
                 },
                 HubEdge {
                     id: "edge2".to_string(),
                     data_dir: edge2,
+                    ws_url: None,
                 },
             ],
         });
