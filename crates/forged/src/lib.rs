@@ -119,9 +119,37 @@ impl<R: CommandRunner> SessionService<R> {
         model: impl Into<String>,
         repo_path: impl AsRef<Path>,
     ) -> anyhow::Result<SessionRecord> {
+        self.start_session_with_worktree(agent, model, repo_path, None)
+    }
+
+    pub fn start_session_with_worktree(
+        &self,
+        agent: AgentType,
+        model: impl Into<String>,
+        repo_path: impl AsRef<Path>,
+        worktree: Option<WorktreeSpec>,
+    ) -> anyhow::Result<SessionRecord> {
+        let repo_path = repo_path.as_ref();
+        let repo_root = forgemux_core::RepoRoot::discover(repo_path)
+            .map(|root| root.path().to_path_buf())
+            .unwrap_or(repo_path.to_path_buf());
+
+        let (session_root, worktree_info) = if let Some(spec) = worktree {
+            let worktree_path = spec.path.clone().unwrap_or_else(|| {
+                repo_root
+                    .join(".forgemux")
+                    .join("worktrees")
+                    .join(&spec.branch)
+            });
+            self.create_worktree(&repo_root, &worktree_path, &spec.branch)?;
+            (worktree_path, Some(spec))
+        } else {
+            (repo_root, None)
+        };
+
         let mut record = self
             .manager
-            .create_session(agent.clone(), model, repo_path)
+            .create_session(agent.clone(), model, &session_root)
             .context("create session record")?;
         record.touch_state(SessionState::Starting);
         self.store.save(&record)?;
@@ -153,6 +181,9 @@ impl<R: CommandRunner> SessionService<R> {
 
         record.touch_state(SessionState::Running);
         self.store.save(&record)?;
+        if let Some(spec) = worktree_info {
+            self.store_worktree_meta(&record.id, &spec)?;
+        }
         Ok(record)
     }
 
@@ -364,6 +395,55 @@ impl<R: CommandRunner> SessionService<R> {
         Ok(())
     }
 
+    fn create_worktree(
+        &self,
+        repo_root: &Path,
+        worktree_path: &Path,
+        branch: &str,
+    ) -> anyhow::Result<()> {
+        if worktree_path.exists() {
+            anyhow::bail!("worktree path already exists: {}", worktree_path.display());
+        }
+        if let Some(parent) = worktree_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let args = vec![
+            "-C".to_string(),
+            repo_root.to_string_lossy().to_string(),
+            "worktree".to_string(),
+            "add".to_string(),
+            "-b".to_string(),
+            branch.to_string(),
+            worktree_path.to_string_lossy().to_string(),
+        ];
+        let output = self.runner.run("git", &args)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git worktree add failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    fn store_worktree_meta(
+        &self,
+        id: &forgemux_core::SessionId,
+        spec: &WorktreeSpec,
+    ) -> anyhow::Result<()> {
+        let path = self
+            .config
+            .data_dir
+            .join("worktrees")
+            .join(format!("{}.json", id.as_str()));
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_vec_pretty(spec)?;
+        fs::write(path, data)?;
+        Ok(())
+    }
+
     fn transcript_path(&self, id: &forgemux_core::SessionId) -> PathBuf {
         self.config.data_dir.join("transcripts").join(format!("{}.log", id.as_str()))
     }
@@ -378,6 +458,12 @@ impl<R: CommandRunner> SessionService<R> {
 
 fn system_time_to_chrono(time: SystemTime) -> DateTime<Utc> {
     DateTime::<Utc>::from(time)
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorktreeSpec {
+    pub branch: String,
+    pub path: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -596,5 +682,30 @@ mod tests {
         assert!(rendered.contains(record.id.as_str()));
         assert!(rendered.contains("errored"));
         assert!(rendered.contains("Codex"));
+    }
+
+    #[test]
+    fn create_worktree_runs_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let status = Command::new("git").arg("init").arg(&repo).status().unwrap();
+        assert!(status.success());
+
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner.clone());
+
+        let worktree_path = tmp.path().join("wt");
+        service
+            .create_worktree(&repo, &worktree_path, "test-branch")
+            .unwrap();
+
+        let calls = runner.calls();
+        assert!(calls.iter().any(|call| {
+            call.contains(&"git".to_string())
+                && call.contains(&"worktree".to_string())
+                && call.contains(&"add".to_string())
+        }));
     }
 }

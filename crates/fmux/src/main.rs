@@ -28,6 +28,12 @@ enum Command {
         repo: String,
         #[arg(long)]
         notify: bool,
+        #[arg(long)]
+        worktree: bool,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        worktree_path: Option<String>,
     },
     Attach {
         session_id: String,
@@ -89,6 +95,9 @@ fn main() {
             model,
             repo,
             notify,
+            worktree,
+            branch,
+            worktree_path,
         } => {
             if notify {
                 eprintln!("warning: --notify requires forged daemon support; falling back to no-op");
@@ -101,7 +110,20 @@ fn main() {
                     std::process::exit(2);
                 }
             };
-            match service.start_session(agent, model, repo) {
+            let worktree_spec = if worktree {
+                let Some(branch) = branch else {
+                    eprintln!("--branch is required with --worktree");
+                    std::process::exit(2);
+                };
+                Some(forged::WorktreeSpec {
+                    branch,
+                    path: worktree_path.map(std::path::PathBuf::from),
+                })
+            } else {
+                None
+            };
+
+            match service.start_session_with_worktree(agent, model, repo, worktree_spec) {
                 Ok(record) => println!("{}", record.id),
                 Err(err) => {
                     eprintln!("start failed: {err}");

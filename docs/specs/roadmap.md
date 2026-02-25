@@ -31,6 +31,7 @@ The core value is twofold: sessions that don't die when your terminal closes, an
 **Capabilities:**
 
 - `fmux start --agent claude` creates a tmux session, launches the agent, starts the sidecar
+- `fmux start --worktree --branch <name>` creates a new git worktree on a new branch and runs the agent inside it
 - `fmux attach <id>` opens an SSH-based tmux attach
 - Sessions survive disconnects; `fmux ls` shows what's running and **what needs you**
 - `fmux logs <id> --follow` streams the transcript

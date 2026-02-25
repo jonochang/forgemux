@@ -243,6 +243,8 @@ fmux start [OPTIONS]
     --agent <name>              Agent type [default: claude] (claude|codex)
     --model <model>             Model preset (e.g. sonnet, opus, o3)
     --repo <path>               Working directory [default: .]
+    --worktree                 Create a git worktree on a new branch
+    --branch <name>             Branch name for worktree (required with --worktree)
     --edge <alias|host:port>    Target edge node
     --policy <name>             Apply named policy from edge config
     --env KEY=VAL               Extra env vars passed to agent (repeatable)
@@ -418,6 +420,8 @@ graph LR
 ```
 
 **Lifecycle Manager.** Spawns tmux sessions, launches agent CLIs inside them, starts sidecar monitors, and handles teardown. Uses `tokio::process::Command` to manage child processes. Communicates with tmux via the `tmux` CLI (not libtmux) to avoid ABI coupling.
+
+**Worktree creation.** When `fmux start --worktree --branch <name>` is provided, the edge daemon creates a new git worktree rooted at a path derived from the branch name (default: `<repo>/.forgemux/worktrees/<branch>`). The daemon runs `git worktree add -b <branch> <path>` and then launches the agent inside that worktree. If the path already exists, the command fails. This behaviour is only enabled when the target `--repo` is inside a git repository.
 
 **Session Map.** In-memory concurrent map (`DashMap<SessionId, SessionState>`) holding live session metadata. Persisted to disk on mutation for crash recovery.
 
