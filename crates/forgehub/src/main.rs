@@ -1,5 +1,8 @@
 use axum::{
-    extract::{State, WebSocketUpgrade},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     response::IntoResponse,
     routing::get,
     Json, Router,
@@ -59,10 +62,8 @@ fn main() -> anyhow::Result<()> {
                 .with_state(shared);
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async move {
-                axum::Server::bind(&addr)
-                    .serve(app.into_make_service())
-                    .await
-                    .unwrap();
+                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                axum::serve(listener, app).await.unwrap();
             });
         }
         Command::Check => println!("ok"),
@@ -93,9 +94,14 @@ async fn list_sessions(
 }
 
 async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
-    ws.on_upgrade(|mut socket| async move {
-        while let Some(Ok(msg)) = socket.recv().await {
-            let _ = socket.send(msg).await;
+    ws.on_upgrade(handle_socket)
+}
+
+async fn handle_socket(mut socket: WebSocket) {
+    while let Some(Ok(msg)) = socket.recv().await {
+        if let Message::Close(_) = msg {
+            break;
         }
-    })
+        let _ = socket.send(msg).await;
+    }
 }
