@@ -31,7 +31,6 @@ The core value is twofold: sessions that don't die when your terminal closes, an
 **Capabilities:**
 
 - `fmux start --agent claude` creates a tmux session, launches the agent, starts the sidecar
-- `fmux start --worktree --branch <name>` creates a new git worktree on a new branch and runs the agent inside it
 - `fmux attach <id>` opens an SSH-based tmux attach
 - Sessions survive disconnects; `fmux ls` shows what's running and **what needs you**
 - `fmux logs <id> --follow` streams the transcript
@@ -169,32 +168,48 @@ template = '{"text": "Session {{session_id}} ({{agent}}) is {{state}}"}'
 
 ---
 
-## Phase 3 — Browser Attach: Web Terminal
+## Phase 3 — Browser and Mobile Attach: Reliable Stream Protocol
 
-**Goal:** Engineers and reviewers can attach to a running session from the browser. Same tmux session, different access mode.
+**Goal:** Engineers and reviewers can attach to a running session from a browser or mobile device. Connections are ephemeral; the session is durable. Reconnections are seamless — no lost output, no double-sent input.
 
 **What ships:**
 
 | Component | Additions |
 |---|---|
-| `forged` | WebSocket bridge (warp + tokio-tungstenite), PTY ring buffer |
-| `forgehub` | WebSocket relay (hub-tunnelled attach), JWT auth |
-| Dashboard | Minimal SPA: session list + xterm.js terminal |
+| `forged` | Reliable stream protocol (event ring buffer, snapshots, input dedup), WebSocket bridge |
+| `forgehub` | WebSocket relay with optional store-and-forward, JWT auth |
+| Dashboard | Minimal SPA: session list + xterm.js terminal with reconnect support |
 | `fmux` | `attach --mode web` opens browser |
 
 **Capabilities:**
 
-- Browser connects via WSS to hub, hub relays to edge, edge bridges to tmux PTY
-- xterm.js renders the terminal in the browser with full fidelity
+- Five-message wire protocol: `RESUME`, `EVENT`, `INPUT`, `ACK`, `SNAPSHOT`
+- Per-session event ring buffer (8 MB / 30 min default) — output events are sequenced with monotonic IDs and replayable on reconnect
+- Client sends `RESUME(last_seen_event_id)` on reconnect; edge replays missed events
+- Input deduplication via `input_id` — every keystroke/line is applied exactly once, ACKed explicitly
+- Periodic terminal snapshots (via `tmux capture-pane`) for fast catch-up after large gaps
+- Hub relay: edge connects outbound to hub, hub exposes stable endpoint for mobile/browser
+- Optional hub store-and-forward buffering for brief client disconnects
+- Watch mode (read-only, throttled) and Control mode (read-write, full ack/dedupe)
+- Adaptive fidelity: keystroke streaming degrades to line-mode under high RTT
+- Chunk coalescing and compression for bandwidth efficiency
+- Offline command queue (line-mode, guarded) for intermittent connectivity
 - SSH and browser attach coexist on the same session simultaneously
-- Read-only attach supported (viewer mode)
-- Ring buffer handles backpressure — slow browsers don't block the agent
-- JWT-based authentication for browser clients
-- `fmux attach <id> --mode web` opens the browser URL directly
+
+**Incremental ship order within this phase:**
+
+1. Event IDs + ring buffer on edge (foundation)
+2. `RESUME` handshake (reconnect without losing output)
+3. `INPUT` ack + dedupe (reliable input)
+4. Chunk coalescing + compression (bandwidth)
+5. Periodic snapshots (fast catch-up)
+6. Hub tunnel + store-and-forward (mobile resilience)
+7. Watch/Control modes + adaptive fidelity (mobile UX)
+8. Offline command queue (intermittent connectivity)
 
 **Dependencies:** Phase 2.
 
-**Estimated effort:** 4–6 weeks.
+**Estimated effort:** 5–7 weeks (expanded from 4–6 to account for the reliable stream layer).
 
 ---
 

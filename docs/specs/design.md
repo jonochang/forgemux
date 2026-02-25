@@ -243,9 +243,6 @@ fmux start [OPTIONS]
     --agent <name>              Agent type [default: claude] (claude|codex)
     --model <model>             Model preset (e.g. sonnet, opus, o3)
     --repo <path>               Working directory [default: .]
-    --worktree                 Create a git worktree on a new branch
-    --branch <name>             Branch name for worktree (required with --worktree)
-    --worktree-path <path>      Optional worktree path override
     --edge <alias|host:port>    Target edge node
     --policy <name>             Apply named policy from edge config
     --env KEY=VAL               Extra env vars passed to agent (repeatable)
@@ -398,9 +395,11 @@ graph LR
     subgraph forged
         LM[Lifecycle Manager]
         SM[Session Map<br/>DashMap]
-        WS[WebSocket Server<br/>warp + tungstenite]
+        WS[WebSocket Server<br/>reliable stream protocol]
         GRPC[gRPC Server<br/>tonic]
-        PC[PTY Capture<br/>ring buffer per session]
+        PC[PTY Capture<br/>event sequencer]
+        RB[Event Ring Buffer<br/>per session]
+        SS[Snapshot Capture<br/>tmux capture-pane]
         UC[Usage Collectors<br/>claude-jsonl / codex-jsonl]
         PE[Policy Engine]
         TR[Transcript Writer]
@@ -410,8 +409,13 @@ graph LR
     LM -->|create/destroy| TMUX[tmux]
     LM -->|enforce| PE
     SM -->|index| LM
-    WS -->|PTY I/O| TMUX
+    WS -->|RESUME / EVENT / ACK| RB
+    WS -->|SNAPSHOT| SS
+    WS -->|INPUT dedupe → write| TMUX
     PC -->|read from| TMUX
+    PC -->|sequenced events| RB
+    SS -->|periodic capture| TMUX
+    RB -->|feed| TR
     UC -->|tail + parse| Logs[(Agent JSONL logs<br/>~/.config/claude/**<br/>~/.codex/sessions/)]
     UC -->|UsageEvent| MR
     TR -->|write| Disk[(Transcript logs)]
@@ -422,13 +426,11 @@ graph LR
 
 **Lifecycle Manager.** Spawns tmux sessions, launches agent CLIs inside them, starts sidecar monitors, and handles teardown. Uses `tokio::process::Command` to manage child processes. Communicates with tmux via the `tmux` CLI (not libtmux) to avoid ABI coupling.
 
-**Worktree creation.** When `fmux start --worktree --branch <name>` is provided, the edge daemon creates a new git worktree rooted at a path derived from the branch name (default: `<repo>/.forgemux/worktrees/<branch>`). The daemon runs `git worktree add -b <branch> <path>` and then launches the agent inside that worktree. If the path already exists, the command fails. This behaviour is only enabled when the target `--repo` is inside a git repository. An explicit path may be provided via `--worktree-path`.
-
 **Session Map.** In-memory concurrent map (`DashMap<SessionId, SessionState>`) holding live session metadata. Persisted to disk on mutation for crash recovery.
 
-**WebSocket Server.** Accepts authenticated WebSocket connections and bridges them to tmux PTY file descriptors. Uses a ring buffer to handle backpressure — if a browser client falls behind, older frames are dropped rather than blocking the agent.
+**WebSocket Server.** Accepts authenticated WebSocket connections and bridges them to tmux PTY file descriptors using the reliable stream protocol. Output bytes are assigned monotonic event IDs and stored in a per-session ring buffer. Clients reconnect with `RESUME(last_seen_event_id)` and receive replayed events from the buffer. Input messages carry `input_id` for deduplication — the edge applies each input exactly once and returns `ACK`. Periodic snapshots (via `tmux capture-pane`) enable fast catch-up after large gaps.
 
-**PTY Capture.** Each session has a dedicated capture thread that reads from the tmux PTY output (via `tmux pipe-pane` or direct PTY fd duplication). Output flows into a fixed-size ring buffer for live streaming and into the transcript writer for persistence.
+**PTY Capture.** Each session has a dedicated capture thread that reads from the tmux PTY output (via `tmux pipe-pane` or direct PTY fd duplication). Output flows into the event ring buffer (sequenced, replayable), into the transcript writer (persistent), and to connected clients via the WebSocket server.
 
 **Policy Engine.** Evaluates per-session policies (CPU, memory, network, filesystem, idle timeout) loaded from a TOML configuration. Enforced via cgroups v2 for resource limits and network namespaces for network isolation.
 
@@ -584,7 +586,7 @@ graph TB
 
 **REST API.** Serves session listing, filtering, detail, and management endpoints. Used by both the dashboard and the CLI.
 
-**WebSocket Relay.** For browser-based terminal attach, the hub can relay the WebSocket connection to the appropriate edge node. This allows browser clients to attach to edge sessions without direct network access to the edge — the hub acts as a tunnel.
+**WebSocket Relay.** For browser-based terminal attach, the hub relays the WebSocket connection to the appropriate edge node. The edge maintains an outbound gRPC tunnel to the hub, so the hub can relay without the client needing direct access to the edge — this is essential for mobile and NAT-traversed environments. Optionally, the hub can buffer output events while a client is disconnected (store-and-forward), making brief edge outages transparent to the client.
 
 **Event Store.** Persists session lifecycle events, token usage records, and aggregated metrics. SQLite for single-hub deployments; Postgres for production/multi-instance.
 
@@ -616,7 +618,7 @@ A browser-based single-page application served by `forgehub`. Not written in Rus
 | `xterm.js` | Terminal emulator in the browser for session attach |
 | `xterm-addon-fit` | Auto-resize terminal to container |
 | `xterm-addon-webgl` | GPU-accelerated rendering for high-throughput sessions |
-| HTMX / Javascript | used to keep things light. HTMX supports SSE and websockets via extensions if needed |
+| SolidJS or Svelte | Reactive UI framework (minimal bundle, fast) |
 | TailwindCSS | Styling |
 
 ### 5. Foreman Agent — Meta-Session Supervisor
@@ -789,37 +791,251 @@ budget_warn_pct = 40               # warn when session hits N% of daily budget
 
 ---
 
-## Data Flow: Browser Attach
+## Data Flow: Browser and Mobile Attach
 
-The most complex data path. This diagram traces a browser user attaching to a running session.
+### Design Principle
+
+The session lives on the edge. Every client connection is ephemeral. Robustness means: reconnect, resume, never lose scrollback, never double-send input. tmux is the durability anchor — flaky networks only affect the web/mobile attach layer, never the agent session itself.
+
+### Wire Protocol
+
+The entire reliable stream layer is built on five message types:
+
+```
+RESUME(last_event_id)                    Client → Edge
+EVENT(event_id, ts, stream, bytes)       Edge → Client
+INPUT(input_id, bytes)                   Client → Edge
+ACK(input_id)                            Edge → Client
+SNAPSHOT(snapshot_id, event_id, data)    Edge → Client
+```
+
+This is sufficient to make browser and mobile attach reliable without modifying tmux.
+
+### Connection Lifecycle
 
 ```mermaid
 sequenceDiagram
-    participant B as Browser (xterm.js)
-    participant H as forgehub (WSRelay)
+    participant C as Client (xterm.js)
+    participant H as forgehub (Relay)
     participant E as forged (WSBridge)
     participant T as tmux session
 
-    B->>H: WSS connect /sessions/S-0a3f/attach
+    C->>H: WSS connect /sessions/S-0a3f/attach
     H->>H: Validate JWT, check policy
     H->>E: Relay WSS to edge (or direct if LAN)
-    E->>E: Validate session exists, check attach policy
-    E->>T: Open PTY read fd (tmux pipe-pane)
-    E->>B: Initial screen buffer (ring buffer snapshot)
+    E->>E: Validate session, check attach policy
 
-    loop Terminal I/O
-        T->>E: PTY output bytes
-        E->>H: Forward via WebSocket
-        H->>B: Forward to xterm.js
-        B->>H: Keystrokes
-        H->>E: Forward to edge
-        E->>T: Write to tmux input fd
+    alt First connect (no prior state)
+        E->>C: SNAPSHOT(latest snapshot + event_id)
+        E->>C: EVENT(event_id+1 ... current) — replay from snapshot
     end
 
-    B->>H: WSS disconnect
-    H->>E: Detach notification
-    E->>E: Log detach event
+    alt Reconnect (client has state)
+        C->>E: RESUME(last_seen_event_id=4821)
+        E->>E: Check if event 4821 is in ring buffer
+        alt Gap is small
+            E->>C: EVENT(4822 ... current) — replay missed events
+        end
+        alt Gap is large (events expired from buffer)
+            E->>C: SNAPSHOT(latest) + EVENT(tail)
+        end
+    end
+
+    loop Live session I/O
+        T->>E: PTY output bytes
+        E->>E: Assign event_id, write to ring buffer
+        E->>H: EVENT(event_id, bytes)
+        H->>C: EVENT(event_id, bytes)
+        C->>C: Store last_seen_event_id
+
+        C->>H: INPUT(input_id=17, bytes)
+        H->>E: INPUT(input_id=17, bytes)
+        E->>E: Dedupe by input_id
+        E->>T: Write to tmux input fd (exactly once)
+        E->>H: ACK(input_id=17)
+        H->>C: ACK(input_id=17)
+    end
+
+    C->>H: WSS disconnect (network drop)
+    Note over E,T: Session continues running. Events accumulate in ring buffer.
+    C->>H: WSS reconnect
+    C->>E: RESUME(last_seen_event_id=4821)
+    E->>C: EVENT(4822 ... current)
+    Note over C: Client resends any unacked INPUTs
+    E->>E: Dedupe, apply new inputs only
 ```
+
+### Output Events and Replay
+
+Every PTY output chunk becomes a sequenced event:
+
+```rust
+struct OutputEvent {
+    event_id: u64,          // monotonic per session, never reused
+    ts: DateTime<Utc>,
+    stream: Stream,         // Stdout | Stderr
+    data: Bytes,            // raw PTY bytes
+}
+```
+
+The edge maintains a **ring buffer** per session (configurable size, default 8 MB / last 30 minutes). Events are also written to the transcript log on disk for long-term retention.
+
+On reconnect:
+1. Client sends `RESUME { last_seen_event_id }`
+2. If the event is in the ring buffer → replay from that point
+3. If the event has been evicted → send latest snapshot, then replay events after the snapshot's `event_id`
+
+**Result: the client never misses output.** The worst case is a full-screen refresh from a snapshot, which takes milliseconds.
+
+### Input Acknowledgement and Deduplication
+
+Mobile reconnections cause "did my keystroke go through?" ambiguity. The protocol resolves this:
+
+```rust
+struct InputMessage {
+    input_id: u64,          // monotonic per client connection
+    data: Bytes,            // keystrokes or line
+}
+
+struct InputAck {
+    input_id: u64,
+}
+```
+
+For every user input:
+1. Client sends `INPUT(input_id, data)`
+2. Edge applies it to the tmux PTY **exactly once**
+3. Edge replies `ACK(input_id)`
+4. Client marks the input as confirmed
+
+On reconnect, the client resends all unacked inputs. The edge deduplicates by `input_id` — if it has already applied that input, it sends `ACK` without re-applying.
+
+**Guarantee: at-most-once input delivery.** No double-sends, no lost keystrokes.
+
+### Terminal Snapshots
+
+Replaying 50,000 events after a long disconnect is slow. Snapshots solve this:
+
+```rust
+struct Snapshot {
+    snapshot_id: u64,
+    event_id_at_snapshot: u64,      // events after this are replayed
+    data: SnapshotData,
+}
+
+enum SnapshotData {
+    /// Last N lines of rendered terminal text (cheap, usually sufficient)
+    ScrollbackText { lines: Vec<String>, cursor_row: u16, cursor_col: u16 },
+    /// Full terminal state serialisation (expensive, pixel-accurate)
+    TerminalState(Bytes),
+}
+```
+
+Snapshots are captured periodically (every N seconds or M KB of output). Given tmux, the cheap approach — capturing the last 5,000–20,000 lines of rendered text via `tmux capture-pane` — is usually sufficient.
+
+On reconnect with a large gap:
+1. Edge sends `SNAPSHOT(latest)`
+2. Client renders the snapshot (instant full-screen refresh)
+3. Edge replays events after the snapshot's `event_id`
+4. Client is caught up in milliseconds, not seconds
+
+### Connection Modes
+
+Browser and mobile have different needs:
+
+```mermaid
+flowchart TD
+    Connect[Client connects] --> Mode{Connection mode?}
+    Mode -->|Watch| Watch[Watch Mode<br/>read-only<br/>throttled updates<br/>lower bandwidth]
+    Mode -->|Control| Control[Control Mode<br/>read-write<br/>full fidelity<br/>input ack/dedupe]
+
+    Control --> InputMode{Network quality?}
+    InputMode -->|Good RTT| Keystroke[Keystroke streaming<br/>every keypress sent]
+    InputMode -->|Poor RTT| Line[Line mode<br/>send on Enter<br/>much less chatter]
+```
+
+**Watch mode** (default on mobile): read-only attach with adaptive throttling. Output events are coalesced into larger batches (50–200ms). Update rate adapts to network conditions. Lower bandwidth, lower battery drain.
+
+**Control mode**: read-write attach with full input ack/dedupe. Starts in keystroke streaming mode but degrades to line mode automatically when RTT exceeds a threshold.
+
+### Hub Relay for Mobile Resilience
+
+Direct-to-edge connections are fragile behind NAT and on mobile. The hub improves resilience:
+
+```mermaid
+graph LR
+    subgraph Mobile/Browser
+        Client[Client]
+    end
+    subgraph Hub["Hub (stable public endpoint)"]
+        Relay[WebSocket Relay]
+        Buffer[Store-and-forward<br/>buffer — optional]
+    end
+    subgraph Edge["Edge (behind NAT)"]
+        Bridge[WSBridge]
+        Ring[Ring Buffer]
+        TMux[tmux session]
+    end
+
+    Client -->|WSS to stable URL| Relay
+    Edge -.->|outbound gRPC tunnel<br/>edge connects out| Relay
+    Relay -->|relay| Bridge
+    Bridge -->|PTY I/O| TMux
+    Buffer -.->|buffer events when<br/>client offline| Client
+```
+
+The edge maintains an **outbound** connection to the hub (edge connects out, so NAT is not an issue). The hub exposes a stable public endpoint. Mobile clients never need to reach the edge directly.
+
+**Optional store-and-forward:** the hub can buffer output events while a client is disconnected. When the client reconnects, the hub replays buffered events before switching to live relay. This makes "edge temporarily offline" survivable for the client — the hub buffers both directions.
+
+### Bandwidth and Battery Optimisations
+
+| Technique | Effect |
+|---|---|
+| **Chunk coalescing** | Merge tiny PTY writes into 50–200ms batches. Reduces message count by 10–50x. |
+| **Compression** | Per-message deflate (WebSocket `permessage-deflate` extension). Effective on terminal output (highly compressible text). |
+| **Backpressure** | If a client can't keep up, drop intermediate events but maintain the snapshot+tail path. Client gets a snapshot on next catch-up. |
+| **Adaptive fidelity** | High RTT → switch to line-mode input automatically. Throttle render updates. |
+| **Watch mode throttle** | Read-only clients receive updates at reduced rate (e.g., 2–5 fps equivalent). |
+
+### Offline Command Queue
+
+For intermittent connectivity (train, elevator, patchy mobile):
+
+- Client allows user to queue commands while offline (line-mode only)
+- UI shows "Queued N commands"
+- On reconnect, queued commands are flushed as `INPUT` messages with sequential `input_id`s
+- Edge applies them in order using standard ack/dedupe
+
+Guardrails: offline queuing is only enabled when the session is in a "safe" state (waiting for input), or requires per-command approval from the user.
+
+### Failure Guarantees (Explicit)
+
+| Guarantee | Mechanism |
+|---|---|
+| **No output loss** | Output is replayable up to retention window (ring buffer + snapshot) |
+| **At-most-once input** | Inputs applied exactly once via `input_id` deduplication |
+| **Session continuity** | Agent continues running with zero clients attached |
+| **Fast resume** | Snapshot + event tail ensures sub-second catch-up |
+| **Graceful degradation** | Keystroke streaming → line mode under poor networks |
+| **Offline resilience** | Command queue + flush on reconnect (line-mode, guarded) |
+
+### Implementation Order
+
+This layer ships incrementally within Phase 3 (Browser Attach):
+
+| Step | What | Enables |
+|---|---|---|
+| 1 | Event IDs + ring buffer on edge | Foundation for all replay |
+| 2 | `RESUME` handshake (`last_seen_event_id`) | Reconnect without losing output |
+| 3 | `INPUT` ack + dedupe | Reliable input on flaky connections |
+| 4 | Chunk coalescing + compression | Bandwidth reduction |
+| 5 | Periodic snapshots (`tmux capture-pane`) | Fast catch-up after large gaps |
+| 6 | Hub tunnel + optional store-and-forward | Mobile resilience behind NAT |
+| 7 | Watch/Control modes + adaptive fidelity | Mobile-optimised experience |
+| 8 | Offline command queue | Intermittent connectivity support |
+
+Steps 1–3 are the minimum viable reliable stream. Steps 4–6 make it production-grade. Steps 7–8 are mobile-specific polish.
 
 ---
 
@@ -1082,7 +1298,19 @@ usage_min_date = "2025-09-01"
 [websocket]
 bind = "0.0.0.0:8080"
 max_connections = 50
-backpressure_buffer = "64KB"
+
+# Reliable stream protocol
+event_ring_buffer_size = "8MB"      # per-session ring buffer for event replay
+event_ring_time_limit = "30m"       # evict events older than this
+snapshot_interval = "30s"           # terminal snapshot frequency
+snapshot_lines = 5000               # lines to capture per snapshot
+input_dedup_window = 1000           # track last N input_ids for dedup
+
+# Bandwidth optimisation
+chunk_coalesce_ms = 100             # batch PTY writes into N ms windows
+compression = true                  # permessage-deflate on WebSocket
+watch_mode_fps = 3                  # update rate for read-only clients
+line_mode_rtt_threshold_ms = 300    # switch to line-mode input above this RTT
 ```
 
 ---
@@ -1164,7 +1392,10 @@ forgemux/
 │   │       ├── lifecycle.rs    # session create/destroy/state machine
 │   │       ├── session.rs      # session state and map
 │   │       ├── pty.rs          # PTY capture and ring buffer
-│   │       ├── ws_bridge.rs    # WebSocket ↔ tmux bridge
+│   │       ├── ws_bridge.rs    # WebSocket ↔ tmux bridge with reliable stream protocol
+│   │       ├── event_ring.rs  # per-session monotonic event ring buffer
+│   │       ├── snapshot.rs    # periodic terminal snapshot via tmux capture-pane
+│   │       ├── input_dedup.rs # input_id tracking and at-most-once delivery
 │   │       ├── policy.rs       # cgroup, namespace, limits
 │   │       ├── transcript.rs   # transcript writer
 │   │       ├── metrics.rs      # metrics collection and reporting
@@ -1177,7 +1408,7 @@ forgemux/
 │   │       ├── commands/       # CLI subcommands (run, check, db, token, etc.)
 │   │       ├── api.rs          # REST endpoints
 │   │       ├── grpc.rs         # edge daemon connections
-│   │       ├── ws_relay.rs     # browser → edge WebSocket relay
+│   │       ├── ws_relay.rs     # browser → edge WebSocket relay + optional store-and-forward
 │   │       ├── aggregator.rs   # cross-node state aggregation
 │   │       ├── registry.rs     # edge node registry
 │   │       ├── auth.rs         # JWT, API tokens, and RBAC
@@ -1187,7 +1418,8 @@ forgemux/
 │       └── proto/
 │           ├── session.proto
 │           ├── metrics.proto
-│           └── control.proto
+│           ├── control.proto
+│           └── stream.proto    # RESUME, EVENT, INPUT, ACK, SNAPSHOT wire types
 ├── dashboard/                  # SPA frontend (TypeScript)
 │   ├── src/
 │   └── package.json
@@ -1247,7 +1479,7 @@ sudo systemctl enable --now forged
 
 1. **tmux interaction method.** Shell out to `tmux` CLI vs. speak the tmux control protocol directly over a Unix socket. CLI is simpler and avoids ABI coupling; control protocol is lower latency and avoids fork overhead. Recommend starting with CLI, benchmarking, and migrating if needed.
 
-2. **Hub relay vs. direct edge connect.** Should browser clients always relay through the hub, or can they connect directly to edge nodes when network allows? Hub relay is simpler for NAT traversal; direct connect reduces latency. Could support both with fallback.
+2. **Hub store-and-forward depth.** The hub can optionally buffer events while a client is disconnected. How deep should this buffer be? Should it persist across hub restarts (disk-backed), or is in-memory sufficient? Deep buffering adds complexity but makes edge outages transparent.
 
 3. **Usage collector resilience.** Both Claude Code and Codex CLI may change their JSONL schemas across versions. The collector should degrade gracefully — log a warning and emit zero-usage events rather than crashing. Should we version-detect the agent CLI at session start and select a schema-aware parser, or rely on defensive parsing with optional fields?
 
