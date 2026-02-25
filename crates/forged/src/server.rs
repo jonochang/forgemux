@@ -1,7 +1,11 @@
 use crate::{CommandRunner, SessionService, WorktreeSpec};
 use axum::{
-    extract::{Path, State},
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        Path, State,
+    },
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
@@ -38,6 +42,7 @@ pub fn build_router<R: CommandRunner + 'static>(
         .route("/sessions/start", post(start_session::<R>))
         .route("/sessions/:id/stop", post(stop_session::<R>))
         .route("/sessions/:id/logs", get(session_logs::<R>))
+        .route("/sessions/:id/attach", get(ws_attach::<R>))
         .with_state(service)
 }
 
@@ -126,6 +131,54 @@ async fn session_logs<R: CommandRunner + 'static>(
                 error: err.to_string(),
             }),
         )),
+    }
+}
+
+async fn ws_attach<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    Path(id): Path<String>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_ws(service, id, socket))
+}
+
+async fn handle_ws<R: CommandRunner + 'static>(
+    service: Arc<SessionService<R>>,
+    id: String,
+    mut socket: WebSocket,
+) {
+    let session_id = forgemux_core::SessionId::from(id.as_str());
+    let mut last_snapshot = String::new();
+
+    loop {
+        if let Ok(snapshot) = service.capture_output(&session_id, 200) {
+            if snapshot != last_snapshot {
+                if socket.send(Message::Text(snapshot.clone())).await.is_err() {
+                    break;
+                }
+                last_snapshot = snapshot;
+            }
+        }
+
+        if let Ok(Some(Ok(msg))) = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            socket.recv(),
+        )
+        .await
+        {
+            match msg {
+                Message::Text(text) => {
+                    let _ = service.send_keys(&session_id, &text);
+                }
+                Message::Binary(bytes) => {
+                    if let Ok(text) = String::from_utf8(bytes) {
+                        let _ = service.send_keys(&session_id, &text);
+                    }
+                }
+                Message::Close(_) => break,
+                _ => {}
+            }
+        }
     }
 }
 

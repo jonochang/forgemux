@@ -393,11 +393,19 @@ impl<R: CommandRunner> SessionService<R> {
     }
 
     fn capture_recent_output(&self, id: &forgemux_core::SessionId) -> anyhow::Result<String> {
+        self.capture_output(id, 100)
+    }
+
+    pub fn capture_output(
+        &self,
+        id: &forgemux_core::SessionId,
+        lines: i32,
+    ) -> anyhow::Result<String> {
         let args = vec![
             "capture-pane".to_string(),
             "-p".to_string(),
             "-S".to_string(),
-            "-100".to_string(),
+            format!("-{}", lines),
             "-t".to_string(),
             id.as_str().to_string(),
         ];
@@ -406,6 +414,49 @@ impl<R: CommandRunner> SessionService<R> {
             return Ok(String::new());
         }
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    }
+
+    pub fn send_keys(&self, id: &forgemux_core::SessionId, input: &str) -> anyhow::Result<()> {
+        let mut literal = input.replace('\r', "");
+        let mut needs_enter = false;
+        if literal.contains('\n') {
+            literal = literal.replace('\n', "");
+            needs_enter = true;
+        }
+
+        if !literal.is_empty() {
+            let args = vec![
+                "send-keys".to_string(),
+                "-t".to_string(),
+                id.as_str().to_string(),
+                "-l".to_string(),
+                literal,
+            ];
+            let output = self.runner.run(&self.config.tmux_bin, &args)?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "tmux send-keys failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+
+        if needs_enter {
+            let args = vec![
+                "send-keys".to_string(),
+                "-t".to_string(),
+                id.as_str().to_string(),
+                "Enter".to_string(),
+            ];
+            let output = self.runner.run(&self.config.tmux_bin, &args)?;
+            if !output.status.success() {
+                anyhow::bail!(
+                    "tmux send-keys Enter failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        Ok(())
     }
 
     fn has_session(&self, id: &forgemux_core::SessionId) -> bool {
@@ -729,5 +780,19 @@ mod tests {
                 && call.contains(&"worktree".to_string())
                 && call.contains(&"add".to_string())
         }));
+    }
+
+    #[test]
+    fn send_keys_uses_tmux() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner.clone());
+
+        let id = forgemux_core::SessionId::from("S-TEST");
+        service.send_keys(&id, "echo hi\n").unwrap();
+
+        let calls = runner.calls();
+        assert!(calls.iter().any(|call| call.contains(&"send-keys".to_string())));
     }
 }

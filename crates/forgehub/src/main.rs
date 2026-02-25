@@ -1,12 +1,13 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
+        Query, State,
     },
     response::IntoResponse,
     routing::get,
     Json, Router,
 };
+use futures_util::{SinkExt, StreamExt};
 use clap::{Parser, Subcommand};
 use forgehub::{HubConfig, HubService};
 use std::net::SocketAddr;
@@ -58,6 +59,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/health", get(health))
                 .route("/sessions", get(list_sessions))
                 .route("/ws", get(ws_handler))
+                .route("/sessions/:id/attach", get(ws_attach))
                 .fallback_service(ServeDir::new("dashboard"))
                 .with_state(shared);
             let rt = tokio::runtime::Runtime::new()?;
@@ -103,5 +105,77 @@ async fn handle_socket(mut socket: WebSocket) {
             break;
         }
         let _ = socket.send(msg).await;
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AttachQuery {
+    edge: Option<String>,
+}
+
+async fn ws_attach(
+    State(service): State<Arc<HubService>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<AttachQuery>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    let ws_url = service
+        .resolve_ws_url(query.edge.as_deref())
+        .unwrap_or_default();
+    ws.on_upgrade(move |socket| relay_ws(ws_url, id, socket))
+}
+
+async fn relay_ws(ws_url: String, id: String, mut client: WebSocket) {
+    if ws_url.is_empty() {
+        let _ = client
+            .send(Message::Text("no edge ws_url configured".to_string()))
+            .await;
+        return;
+    }
+    let target = format!("{}/sessions/{}/attach", ws_url.trim_end_matches('/'), id);
+    let Ok((mut upstream, _)) = tokio_tungstenite::connect_async(target).await else {
+        let _ = client
+            .send(Message::Text("failed to connect to edge".to_string()))
+            .await;
+        return;
+    };
+
+    loop {
+        tokio::select! {
+            msg = client.recv() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        let tungstenite_msg = match msg {
+                            Message::Text(text) => tokio_tungstenite::tungstenite::Message::Text(text),
+                            Message::Binary(bin) => tokio_tungstenite::tungstenite::Message::Binary(bin),
+                            Message::Close(_) => {
+                                let _ = upstream.close(None).await;
+                                break;
+                            }
+                            _ => continue,
+                        };
+                        let _ = upstream.send(tungstenite_msg).await;
+                    }
+                    _ => break,
+                }
+            }
+            msg = upstream.next() => {
+                match msg {
+                    Some(Ok(msg)) => {
+                        let axum_msg = match msg {
+                            tokio_tungstenite::tungstenite::Message::Text(text) => Message::Text(text),
+                            tokio_tungstenite::tungstenite::Message::Binary(bin) => Message::Binary(bin),
+                            tokio_tungstenite::tungstenite::Message::Close(_) => {
+                                let _ = client.close().await;
+                                break;
+                            }
+                            _ => continue,
+                        };
+                        let _ = client.send(axum_msg).await;
+                    }
+                    _ => break,
+                }
+            }
+        }
     }
 }

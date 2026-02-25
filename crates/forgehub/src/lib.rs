@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 pub struct HubEdge {
     pub id: String,
     pub data_dir: PathBuf,
+    pub ws_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +36,21 @@ impl HubService {
 
     pub fn list_edges(&self) -> Vec<HubEdge> {
         self.config.edges.clone()
+    }
+
+    pub fn resolve_ws_url(&self, edge_id: Option<&str>) -> Option<String> {
+        if let Some(id) = edge_id {
+            return self
+                .config
+                .edges
+                .iter()
+                .find(|edge| edge.id == id)
+                .and_then(|edge| edge.ws_url.clone());
+        }
+        if self.config.edges.len() == 1 {
+            return self.config.edges[0].ws_url.clone();
+        }
+        None
     }
 
     pub fn list_sessions(&self) -> anyhow::Result<Vec<SessionRecord>> {

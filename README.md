@@ -72,6 +72,7 @@ data_dir = "./.forgemux-hub"
 [[edges]]
 id = "edge-01"
 data_dir = "/path/to/edge/.forgemux"
+ws_url = "ws://127.0.0.1:9090"
 ```
 
 ## Layout
