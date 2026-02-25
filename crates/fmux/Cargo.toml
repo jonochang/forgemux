@@ -20,4 +20,7 @@ path = "../forgehub"
 
 [dependencies.reqwest]
 version = "0.12"
-features = ["json"]
+features = ["json", "blocking"]
+
+[dependencies.serde_json]
+workspace = true

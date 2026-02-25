@@ -1,6 +1,7 @@
 use clap::{Parser, Subcommand};
 use forged::{ForgedConfig, OsCommandRunner, SessionService};
 use forgemux_core::{sort_sessions, AgentType, SessionState};
+use serde_json::Value as JsonValue;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -144,13 +145,15 @@ fn main() {
             let response = client.post(url).json(&request).send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
-                    let body: forged::server::StartResponse = resp.json().unwrap();
+                    let body = resp.json::<forged::server::StartResponse>().unwrap();
                     println!("{}", body.session_id);
                 }
                 Ok(resp) => {
-                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
-                        forged::server::ErrorResponse { error: "unknown error".to_string() },
-                    );
+                    let body = resp
+                        .json::<forged::server::ErrorResponse>()
+                        .unwrap_or(forged::server::ErrorResponse {
+                            error: "unknown error".to_string(),
+                        });
                     eprintln!("start failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -183,9 +186,11 @@ fn main() {
             match response {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
-                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
-                        forged::server::ErrorResponse { error: "unknown error".to_string() },
-                    );
+                    let body = resp
+                        .json::<forged::server::ErrorResponse>()
+                        .unwrap_or(forged::server::ErrorResponse {
+                            error: "unknown error".to_string(),
+                        });
                     eprintln!("stop failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -206,9 +211,11 @@ fn main() {
             match response {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
-                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
-                        forged::server::ErrorResponse { error: "unknown error".to_string() },
-                    );
+                    let body = resp
+                        .json::<forged::server::ErrorResponse>()
+                        .unwrap_or(forged::server::ErrorResponse {
+                            error: "unknown error".to_string(),
+                        });
                     eprintln!("kill failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -228,9 +235,11 @@ fn main() {
                     print_sessions(sessions);
                 }
                 Ok(resp) => {
-                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
-                        forged::server::ErrorResponse { error: "unknown error".to_string() },
-                    );
+                    let body = resp
+                        .json::<forged::server::ErrorResponse>()
+                        .unwrap_or(forged::server::ErrorResponse {
+                            error: "unknown error".to_string(),
+                        });
                     eprintln!("ls failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -264,9 +273,11 @@ fn main() {
                 }
                 }
                 Ok(resp) => {
-                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
-                        forged::server::ErrorResponse { error: "unknown error".to_string() },
-                    );
+                    let body = resp
+                        .json::<forged::server::ErrorResponse>()
+                        .unwrap_or(forged::server::ErrorResponse {
+                            error: "unknown error".to_string(),
+                        });
                     eprintln!("status failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -291,15 +302,17 @@ fn main() {
                 let response = client.get(url).send();
                 match response {
                     Ok(resp) if resp.status().is_success() => {
-                        let payload: serde_json::Value = resp.json().unwrap();
+                        let payload: JsonValue = resp.json().unwrap();
                         if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
                             println!("{content}");
                         }
                     }
                     Ok(resp) => {
-                        let body: forged::server::ErrorResponse = resp.json().unwrap_or(
-                            forged::server::ErrorResponse { error: "unknown error".to_string() },
-                        );
+                        let body = resp
+                            .json::<forged::server::ErrorResponse>()
+                            .unwrap_or(forged::server::ErrorResponse {
+                                error: "unknown error".to_string(),
+                            });
                         eprintln!("logs failed: {}", body.error);
                         std::process::exit(1);
                     }
@@ -320,7 +333,7 @@ fn main() {
                     let response = client.get(url).send();
                     match response {
                         Ok(resp) if resp.status().is_success() => {
-                            let payload: serde_json::Value = resp.json().unwrap();
+                            let payload: JsonValue = resp.json().unwrap();
                             let content = payload
                                 .get("content")
                                 .and_then(|v| v.as_str())
@@ -337,11 +350,11 @@ fn main() {
                             last_content = content;
                         }
                         Ok(resp) => {
-                            let body: forged::server::ErrorResponse = resp.json().unwrap_or(
-                                forged::server::ErrorResponse {
+                            let body = resp
+                                .json::<forged::server::ErrorResponse>()
+                                .unwrap_or(forged::server::ErrorResponse {
                                     error: "unknown error".to_string(),
-                                },
-                            );
+                                });
                             eprintln!("logs failed: {}", body.error);
                             std::process::exit(1);
                         }
@@ -364,9 +377,11 @@ fn main() {
                     print_sessions(sessions);
                 }
                 Ok(resp) => {
-                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
-                        forged::server::ErrorResponse { error: "unknown error".to_string() },
-                    );
+                    let body = resp
+                        .json::<forged::server::ErrorResponse>()
+                        .unwrap_or(forged::server::ErrorResponse {
+                            error: "unknown error".to_string(),
+                        });
                     eprintln!("watch failed: {}", body.error);
                     std::process::exit(1);
                 }
