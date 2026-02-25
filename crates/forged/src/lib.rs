@@ -142,6 +142,10 @@ impl<R: CommandRunner> SessionService<R> {
         Ok(self.store.load(&id)?)
     }
 
+    pub fn load_session(&self, id: &forgemux_core::SessionId) -> anyhow::Result<SessionRecord> {
+        Ok(self.store.load(id)?)
+    }
+
     pub fn refresh_states(&self) -> anyhow::Result<Vec<SessionRecord>> {
         let sessions = self.store.list()?;
         let detector = self.build_detector();
@@ -351,5 +355,23 @@ mod tests {
             call.contains(&"new-session".to_string())
                 && call.contains(&record.id.as_str().to_string())
         }));
+    }
+
+    #[test]
+    fn start_session_records_error_on_tmux_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner {
+            should_fail: true,
+            ..Default::default()
+        };
+        let service = SessionService::new(config, runner);
+
+        let result = service.start_session(AgentType::Claude, "sonnet", tmp.path());
+        assert!(result.is_err());
+
+        let sessions = service.list_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].state, SessionState::Errored);
     }
 }
