@@ -15,7 +15,7 @@ pub enum CoreError {
     SessionNotFound(String),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum AgentType {
     Claude,
     Codex,
