@@ -1,4 +1,9 @@
-use axum::{extract::State, routing::get, Json, Router};
+use axum::{
+    extract::{State, WebSocketUpgrade},
+    response::IntoResponse,
+    routing::get,
+    Json, Router,
+};
 use clap::{Parser, Subcommand};
 use forgehub::{HubConfig, HubService};
 use std::net::SocketAddr;
@@ -49,6 +54,7 @@ fn main() -> anyhow::Result<()> {
             let app = Router::new()
                 .route("/health", get(health))
                 .route("/sessions", get(list_sessions))
+                .route("/ws", get(ws_handler))
                 .fallback_service(ServeDir::new("dashboard"))
                 .with_state(shared);
             let rt = tokio::runtime::Runtime::new()?;
@@ -84,4 +90,12 @@ async fn list_sessions(
 ) -> Json<Vec<forgemux_core::SessionRecord>> {
     let sessions = service.list_sessions().unwrap_or_default();
     Json(sessions)
+}
+
+async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
+    ws.on_upgrade(|mut socket| async move {
+        while let Some(Ok(msg)) = socket.recv().await {
+            let _ = socket.send(msg).await;
+        }
+    })
 }
