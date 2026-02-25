@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use forged::{ForgedConfig, OsCommandRunner, SessionService};
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -8,6 +9,8 @@ use std::path::PathBuf;
 struct Cli {
     #[arg(long, default_value = "./.forgemux")]
     data_dir: PathBuf,
+    #[arg(long, default_value = "127.0.0.1:9090")]
+    bind: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -32,7 +35,13 @@ fn main() -> anyhow::Result<()> {
 
     match cli.command {
         Command::Run => {
-            println!("forged run: not implemented yet");
+            let addr: SocketAddr = cli.bind.parse()?;
+            let app = forged::server::build_router(std::sync::Arc::new(service));
+            let rt = tokio::runtime::Runtime::new()?;
+            rt.block_on(async move {
+                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                axum::serve(listener, app).await.unwrap();
+            });
         }
         Command::Check => {
             service.list_sessions()?;

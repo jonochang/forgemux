@@ -31,28 +31,34 @@ cargo test
 
 ## Quick Start
 
+Run the edge daemon:
+
+```sh
+forged run --data-dir ./.forgemux --bind 127.0.0.1:9090
+```
+
 Start a session in the current repo:
 
 ```sh
-fmux start --agent claude --model sonnet --repo .
+fmux --edge http://127.0.0.1:9090 start --agent claude --model sonnet --repo .
 ```
 
 Start a session in a new git worktree on a new branch (default path):
 
 ```sh
-fmux start --worktree --branch my-feature
+fmux --edge http://127.0.0.1:9090 start --worktree --branch my-feature
 ```
 
 Override the worktree path:
 
 ```sh
-fmux start --worktree --branch my-feature --worktree-path /path/to/worktree
+fmux --edge http://127.0.0.1:9090 start --worktree --branch my-feature --worktree-path /path/to/worktree
 ```
 
 List and attach:
 
 ```sh
-fmux ls
+fmux --edge http://127.0.0.1:9090 ls
 fmux attach S-xxxxxxx
 ```
 

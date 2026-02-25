@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::SystemTime;
 
+pub mod server;
+
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output>;
 }
@@ -21,6 +23,40 @@ pub struct OsCommandRunner;
 impl CommandRunner for OsCommandRunner {
     fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output> {
         Command::new(program).args(args).output()
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub struct FakeRunner {
+    calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
+    pub should_fail: bool,
+}
+
+#[cfg(test)]
+impl FakeRunner {
+    pub fn calls(&self) -> Vec<Vec<String>> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+impl CommandRunner for FakeRunner {
+    fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output> {
+        use std::os::unix::process::ExitStatusExt;
+        let mut call = vec![program.to_string()];
+        call.extend_from_slice(args);
+        self.calls.lock().unwrap().push(call);
+        let status = if self.should_fail {
+            std::process::ExitStatus::from_raw(1)
+        } else {
+            std::process::ExitStatus::from_raw(0)
+        };
+        Ok(Output {
+            status,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
     }
 }
 
@@ -474,6 +510,16 @@ pub struct WorktreeSpec {
     pub path: Option<PathBuf>,
 }
 
+#[cfg(test)]
+impl Default for WorktreeSpec {
+    fn default() -> Self {
+        Self {
+            branch: "test-branch".to_string(),
+            path: None,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct NotificationEngine {
     last_fired: std::sync::Mutex<HashMap<(String, NotificationEvent), DateTime<Utc>>>,
@@ -580,38 +626,6 @@ fn render_template(template: &str, session: &SessionRecord, event: NotificationE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::process::ExitStatusExt;
-    use std::sync::{Arc, Mutex};
-
-    #[derive(Clone, Default)]
-    struct FakeRunner {
-        calls: Arc<Mutex<Vec<Vec<String>>>>,
-        should_fail: bool,
-    }
-
-    impl FakeRunner {
-        fn calls(&self) -> Vec<Vec<String>> {
-            self.calls.lock().unwrap().clone()
-        }
-    }
-
-    impl CommandRunner for FakeRunner {
-        fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output> {
-            let mut call = vec![program.to_string()];
-            call.extend_from_slice(args);
-            self.calls.lock().unwrap().push(call);
-            let status = if self.should_fail {
-                std::process::ExitStatus::from_raw(1)
-            } else {
-                std::process::ExitStatus::from_raw(0)
-            };
-            Ok(Output {
-                status,
-                stdout: Vec::new(),
-                stderr: Vec::new(),
-            })
-        }
-    }
 
     #[test]
     fn start_session_invokes_tmux_new_session() {

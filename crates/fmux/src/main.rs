@@ -13,6 +13,8 @@ struct Cli {
     data_dir: PathBuf,
     #[arg(long, default_value = "./.forgemux-hub.toml")]
     hub_config: PathBuf,
+    #[arg(long, default_value = "http://127.0.0.1:9090")]
+    edge: String,
     #[command(subcommand)]
     command: Command,
 }
@@ -123,8 +125,35 @@ fn main() {
                 None
             };
 
-            match service.start_session_with_worktree(agent, model, repo, worktree_spec) {
-                Ok(record) => println!("{}", record.id),
+            let request = forged::server::StartRequest {
+                agent: match agent {
+                    AgentType::Claude => "claude".to_string(),
+                    AgentType::Codex => "codex".to_string(),
+                },
+                model,
+                repo,
+                worktree: worktree_spec.is_some(),
+                branch: worktree_spec.as_ref().map(|spec| spec.branch.clone()),
+                worktree_path: worktree_spec.as_ref().and_then(|spec| {
+                    spec.path.as_ref().map(|p| p.to_string_lossy().to_string())
+                }),
+            };
+
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/sessions/start", cli.edge.trim_end_matches('/'));
+            let response = client.post(url).json(&request).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: forged::server::StartResponse = resp.json().unwrap();
+                    println!("{}", body.session_id);
+                }
+                Ok(resp) => {
+                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
+                        forged::server::ErrorResponse { error: "unknown error".to_string() },
+                    );
+                    eprintln!("start failed: {}", body.error);
+                    std::process::exit(1);
+                }
                 Err(err) => {
                     eprintln!("start failed: {err}");
                     std::process::exit(1);
@@ -144,29 +173,81 @@ fn main() {
             }
         }
         Command::Stop { session_id } => {
-            if let Err(err) = service.stop_session(&session_id) {
-                eprintln!("stop failed: {err}");
-                std::process::exit(1);
+            let client = reqwest::blocking::Client::new();
+            let url = format!(
+                "{}/sessions/{}/stop",
+                cli.edge.trim_end_matches('/'),
+                session_id
+            );
+            let response = client.post(url).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => {
+                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
+                        forged::server::ErrorResponse { error: "unknown error".to_string() },
+                    );
+                    eprintln!("stop failed: {}", body.error);
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("stop failed: {err}");
+                    std::process::exit(1);
+                }
             }
         }
         Command::Kill { session_id } => {
-            if let Err(err) = service.kill_session(&session_id) {
-                eprintln!("kill failed: {err}");
-                std::process::exit(1);
+            let client = reqwest::blocking::Client::new();
+            let url = format!(
+                "{}/sessions/{}/stop",
+                cli.edge.trim_end_matches('/'),
+                session_id
+            );
+            let response = client.post(url).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => {
+                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
+                        forged::server::ErrorResponse { error: "unknown error".to_string() },
+                    );
+                    eprintln!("kill failed: {}", body.error);
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("kill failed: {err}");
+                    std::process::exit(1);
+                }
             }
         }
         Command::Ls => {
-            match service.list_sessions() {
-                Ok(sessions) => print_sessions(sessions),
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/sessions", cli.edge.trim_end_matches('/'));
+            let response = client.get(url).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let sessions: Vec<forgemux_core::SessionRecord> = resp.json().unwrap();
+                    print_sessions(sessions);
+                }
+                Ok(resp) => {
+                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
+                        forged::server::ErrorResponse { error: "unknown error".to_string() },
+                    );
+                    eprintln!("ls failed: {}", body.error);
+                    std::process::exit(1);
+                }
                 Err(err) => {
                     eprintln!("ls failed: {err}");
                     std::process::exit(1);
                 }
             }
         }
-        Command::Status { session_id } => match service.list_sessions() {
-            Ok(sessions) => {
-                let sessions = sort_sessions(sessions);
+        Command::Status { session_id } => {
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/sessions", cli.edge.trim_end_matches('/'));
+            let response = client.get(url).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let sessions: Vec<forgemux_core::SessionRecord> = resp.json().unwrap();
+                    let sessions = sort_sessions(sessions);
                 match sessions.into_iter().find(|s| s.id.as_str() == session_id) {
                     Some(session) => {
                         println!("ID: {}", session.id);
@@ -181,20 +262,47 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+                }
+                Ok(resp) => {
+                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
+                        forged::server::ErrorResponse { error: "unknown error".to_string() },
+                    );
+                    eprintln!("status failed: {}", body.error);
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("status failed: {err}");
+                    std::process::exit(1);
+                }
             }
-            Err(err) => {
-                eprintln!("status failed: {err}");
-                std::process::exit(1);
-            }
-        },
+        }
         Command::Logs {
             session_id,
             tail,
             follow,
         } => {
             if !follow {
-                match service.logs(&session_id, tail) {
-                    Ok(content) => println!("{content}"),
+                let client = reqwest::blocking::Client::new();
+                let url = format!(
+                    "{}/sessions/{}/logs",
+                    cli.edge.trim_end_matches('/'),
+                    session_id
+                );
+                let response = client.get(url).send();
+                match response {
+                    Ok(resp) if resp.status().is_success() => {
+                        let payload: serde_json::Value = resp.json().unwrap();
+                        if let Some(content) = payload.get("content").and_then(|v| v.as_str()) {
+                            println!("{content}");
+                        }
+                    }
+                    Ok(resp) => {
+                        let body: forged::server::ErrorResponse = resp.json().unwrap_or(
+                            forged::server::ErrorResponse { error: "unknown error".to_string() },
+                        );
+                        eprintln!("logs failed: {}", body.error);
+                        std::process::exit(1);
+                    }
                     Err(err) => {
                         eprintln!("logs failed: {err}");
                         std::process::exit(1);
@@ -203,8 +311,21 @@ fn main() {
             } else {
                 let mut last_content = String::new();
                 loop {
-                    match service.logs(&session_id, tail) {
-                        Ok(content) => {
+                    let client = reqwest::blocking::Client::new();
+                    let url = format!(
+                        "{}/sessions/{}/logs",
+                        cli.edge.trim_end_matches('/'),
+                        session_id
+                    );
+                    let response = client.get(url).send();
+                    match response {
+                        Ok(resp) if resp.status().is_success() => {
+                            let payload: serde_json::Value = resp.json().unwrap();
+                            let content = payload
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
                             if content.starts_with(&last_content) {
                                 let delta = &content[last_content.len()..];
                                 if !delta.is_empty() {
@@ -214,6 +335,15 @@ fn main() {
                                 println!("{content}");
                             }
                             last_content = content;
+                        }
+                        Ok(resp) => {
+                            let body: forged::server::ErrorResponse = resp.json().unwrap_or(
+                                forged::server::ErrorResponse {
+                                    error: "unknown error".to_string(),
+                                },
+                            );
+                            eprintln!("logs failed: {}", body.error);
+                            std::process::exit(1);
                         }
                         Err(err) => {
                             eprintln!("logs failed: {err}");
@@ -225,8 +355,21 @@ fn main() {
             }
         }
         Command::Watch { interval } => loop {
-            match service.refresh_states() {
-                Ok(sessions) => print_sessions(sessions),
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/sessions", cli.edge.trim_end_matches('/'));
+            let response = client.get(url).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let sessions: Vec<forgemux_core::SessionRecord> = resp.json().unwrap();
+                    print_sessions(sessions);
+                }
+                Ok(resp) => {
+                    let body: forged::server::ErrorResponse = resp.json().unwrap_or(
+                        forged::server::ErrorResponse { error: "unknown error".to_string() },
+                    );
+                    eprintln!("watch failed: {}", body.error);
+                    std::process::exit(1);
+                }
                 Err(err) => {
                     eprintln!("watch failed: {err}");
                     std::process::exit(1);
