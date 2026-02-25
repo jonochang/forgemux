@@ -11,6 +11,8 @@ use std::time::Duration;
 struct Cli {
     #[arg(long, default_value = "./.forgemux")]
     data_dir: PathBuf,
+    #[arg(long, default_value = "./.forgemux-hub.toml")]
+    hub_config: PathBuf,
     #[command(subcommand)]
     command: Command,
 }
@@ -54,6 +56,7 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         interval: u64,
     },
+    Edges,
     Version,
 }
 
@@ -183,6 +186,23 @@ fn main() {
                 }
             }
             thread::sleep(Duration::from_secs(interval));
+        },
+        Command::Edges => match forgehub::HubConfig::load(&cli.hub_config) {
+            Ok(cfg) => {
+                let hub = forgehub::HubService::new(cfg);
+                let edges = hub.list_edges();
+                if edges.is_empty() {
+                    println!("no edges");
+                } else {
+                    for edge in edges {
+                        println!("{} {}", edge.id, edge.data_dir.display());
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("edges failed: {err}");
+                std::process::exit(1);
+            }
         },
         Command::Version => {
             println!("fmux 0.1.0");
