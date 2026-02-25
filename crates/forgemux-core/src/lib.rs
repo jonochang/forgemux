@@ -33,6 +33,22 @@ pub enum SessionState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionRole {
+    Worker,
+    Foreman {
+        watch_scope: Vec<String>,
+        intervention: InterventionLevel,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InterventionLevel {
+    Advisory,
+    Assisted,
+    Autonomous,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionId(String);
 
 impl SessionId {
@@ -72,6 +88,7 @@ pub struct SessionRecord {
     pub model: String,
     pub repo_root: PathBuf,
     pub state: SessionState,
+    pub role: SessionRole,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -86,6 +103,7 @@ impl SessionRecord {
             model: model.into(),
             repo_root,
             state: SessionState::Provisioning,
+            role: SessionRole::Worker,
             created_at: now,
             updated_at: now,
             last_activity_at: now,
@@ -251,11 +269,22 @@ impl SessionManager {
         model: impl Into<String>,
         repo_path: impl AsRef<Path>,
     ) -> Result<SessionRecord, CoreError> {
+        self.create_session_with_role(agent, model, repo_path, SessionRole::Worker)
+    }
+
+    pub fn create_session_with_role(
+        &self,
+        agent: AgentType,
+        model: impl Into<String>,
+        repo_path: impl AsRef<Path>,
+        role: SessionRole,
+    ) -> Result<SessionRecord, CoreError> {
         let canonical = fs::canonicalize(repo_path.as_ref())?;
         let repo_root = RepoRoot::discover(&canonical)
             .map(|root| root.path().to_path_buf())
             .unwrap_or(canonical);
-        let record = SessionRecord::new(agent, model, repo_root);
+        let mut record = SessionRecord::new(agent, model, repo_root);
+        record.role = role;
         self.store.save(&record)?;
         Ok(record)
     }

@@ -1,8 +1,8 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use forgemux_core::{
-    sort_sessions, AgentType, SessionManager, SessionRecord, SessionState, SessionStore, StateDetector,
-    StateSignal,
+    sort_sessions, AgentType, InterventionLevel, SessionManager, SessionRecord, SessionRole,
+    SessionState, SessionStore, StateDetector, StateSignal,
 };
 use regex::Regex;
 use std::collections::HashMap;
@@ -151,6 +151,54 @@ impl<R: CommandRunner> SessionService<R> {
 
         self.ensure_transcript_pipe(&record)?;
 
+        record.touch_state(SessionState::Running);
+        self.store.save(&record)?;
+        Ok(record)
+    }
+
+    pub fn start_foreman(
+        &self,
+        agent: AgentType,
+        model: impl Into<String>,
+        repo_path: impl AsRef<Path>,
+        watch_scope: Vec<String>,
+        intervention: InterventionLevel,
+    ) -> anyhow::Result<SessionRecord> {
+        let role = SessionRole::Foreman {
+            watch_scope,
+            intervention,
+        };
+        let mut record = self
+            .manager
+            .create_session_with_role(agent.clone(), model, repo_path, role)
+            .context("create foreman session")?;
+        record.touch_state(SessionState::Starting);
+        self.store.save(&record)?;
+
+        let agent_cfg = self
+            .config
+            .agents
+            .get(&agent)
+            .context("missing agent config")?;
+
+        let mut args = vec![
+            "new-session".to_string(),
+            "-d".to_string(),
+            "-s".to_string(),
+            record.id.as_str().to_string(),
+            "--".to_string(),
+            agent_cfg.command.clone(),
+        ];
+        args.extend(agent_cfg.args.iter().cloned());
+
+        let output = self.runner.run(&self.config.tmux_bin, &args)?;
+        if !output.status.success() {
+            record.touch_state(SessionState::Errored);
+            self.store.save(&record)?;
+            anyhow::bail!("tmux failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        self.ensure_transcript_pipe(&record)?;
         record.touch_state(SessionState::Running);
         self.store.save(&record)?;
         Ok(record)

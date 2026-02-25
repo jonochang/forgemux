@@ -57,6 +57,20 @@ enum Command {
         interval: u64,
     },
     Edges,
+    ForemanStart {
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        #[arg(long, default_value = "sonnet")]
+        model: String,
+        #[arg(long, default_value = ".")]
+        repo: String,
+        #[arg(long, default_value = "all")]
+        watch: String,
+        #[arg(long, default_value = "advisory")]
+        intervention: String,
+    },
+    ForemanStatus,
+    ForemanReport,
     Version,
 }
 
@@ -204,6 +218,65 @@ fn main() {
                 std::process::exit(1);
             }
         },
+        Command::ForemanStart {
+            agent,
+            model,
+            repo,
+            watch,
+            intervention,
+        } => {
+            let agent = match agent.as_str() {
+                "claude" => AgentType::Claude,
+                "codex" => AgentType::Codex,
+                other => {
+                    eprintln!("unknown agent: {other}");
+                    std::process::exit(2);
+                }
+            };
+            let intervention = match intervention.as_str() {
+                "advisory" => forgemux_core::InterventionLevel::Advisory,
+                "assisted" => forgemux_core::InterventionLevel::Assisted,
+                "autonomous" => forgemux_core::InterventionLevel::Autonomous,
+                other => {
+                    eprintln!("unknown intervention: {other}");
+                    std::process::exit(2);
+                }
+            };
+            let watch_scope = if watch == "all" {
+                Vec::new()
+            } else {
+                watch.split(',').map(|s| s.trim().to_string()).collect()
+            };
+            match service.start_foreman(agent, model, repo, watch_scope, intervention) {
+                Ok(record) => println!("{}", record.id),
+                Err(err) => {
+                    eprintln!("foreman start failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::ForemanStatus => match service.list_sessions() {
+            Ok(sessions) => {
+                let foremen: Vec<_> = sessions
+                    .into_iter()
+                    .filter(|s| matches!(s.role, forgemux_core::SessionRole::Foreman { .. }))
+                    .collect();
+                if foremen.is_empty() {
+                    println!("no foreman sessions");
+                } else {
+                    for session in foremen {
+                        println!("{} {:?} {:?}", session.id, session.agent, session.state);
+                    }
+                }
+            }
+            Err(err) => {
+                eprintln!("foreman status failed: {err}");
+                std::process::exit(1);
+            }
+        },
+        Command::ForemanReport => {
+            println!("foreman report not implemented yet");
+        }
         Command::Version => {
             println!("fmux 0.1.0");
         }
