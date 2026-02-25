@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 use forged::{ForgedConfig, OsCommandRunner, SessionService};
 use forgemux_core::{sort_sessions, AgentType, SessionState};
+use serde::Deserialize;
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
@@ -12,6 +14,8 @@ use std::time::Duration;
 struct Cli {
     #[arg(long, default_value = "./.forgemux")]
     data_dir: PathBuf,
+    #[arg(long, default_value = "~/.config/forgemux/config.toml")]
+    config: String,
     #[arg(long, default_value = "./.forgemux-hub.toml")]
     hub_config: PathBuf,
     #[arg(long, default_value = "http://127.0.0.1:9090")]
@@ -89,6 +93,8 @@ fn main() {
         .init();
 
     let cli = Cli::parse();
+    let cli_config = load_cli_config(&cli.config).unwrap_or_default();
+    let edge_addr = resolve_edge(&cli.edge, &cli_config);
     let config = ForgedConfig::default_with_data_dir(cli.data_dir);
     let service = SessionService::new(config, OsCommandRunner);
 
@@ -141,7 +147,7 @@ fn main() {
             };
 
             let client = reqwest::blocking::Client::new();
-            let url = format!("{}/sessions/start", cli.edge.trim_end_matches('/'));
+            let url = format!("{}/sessions/start", edge_addr.trim_end_matches('/'));
             let response = client.post(url).json(&request).send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -179,7 +185,7 @@ fn main() {
             let client = reqwest::blocking::Client::new();
             let url = format!(
                 "{}/sessions/{}/stop",
-                cli.edge.trim_end_matches('/'),
+                edge_addr.trim_end_matches('/'),
                 session_id
             );
             let response = client.post(url).send();
@@ -204,7 +210,7 @@ fn main() {
             let client = reqwest::blocking::Client::new();
             let url = format!(
                 "{}/sessions/{}/stop",
-                cli.edge.trim_end_matches('/'),
+                edge_addr.trim_end_matches('/'),
                 session_id
             );
             let response = client.post(url).send();
@@ -227,7 +233,7 @@ fn main() {
         }
         Command::Ls => {
             let client = reqwest::blocking::Client::new();
-            let url = format!("{}/sessions", cli.edge.trim_end_matches('/'));
+            let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
             let response = client.get(url).send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -251,7 +257,7 @@ fn main() {
         }
         Command::Status { session_id } => {
             let client = reqwest::blocking::Client::new();
-            let url = format!("{}/sessions", cli.edge.trim_end_matches('/'));
+            let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
             let response = client.get(url).send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -296,7 +302,7 @@ fn main() {
                 let client = reqwest::blocking::Client::new();
                 let url = format!(
                     "{}/sessions/{}/logs",
-                    cli.edge.trim_end_matches('/'),
+                    edge_addr.trim_end_matches('/'),
                     session_id
                 );
                 let response = client.get(url).send();
@@ -327,7 +333,7 @@ fn main() {
                     let client = reqwest::blocking::Client::new();
                     let url = format!(
                         "{}/sessions/{}/logs",
-                        cli.edge.trim_end_matches('/'),
+                        edge_addr.trim_end_matches('/'),
                         session_id
                     );
                     let response = client.get(url).send();
@@ -369,7 +375,7 @@ fn main() {
         }
         Command::Watch { interval } => loop {
             let client = reqwest::blocking::Client::new();
-            let url = format!("{}/sessions", cli.edge.trim_end_matches('/'));
+            let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
             let response = client.get(url).send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -494,5 +500,77 @@ fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {
             "{}\\t{:?}\\t{}\\t{}",
             session.id, session.agent, session.model, state
         );
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CliConfig {
+    #[allow(dead_code)]
+    pub hub_url: Option<String>,
+    #[serde(default)]
+    pub edges: HashMap<String, String>,
+}
+
+fn load_cli_config(path: &str) -> anyhow::Result<CliConfig> {
+    let path = expand_tilde(path);
+    if !path.exists() {
+        return Ok(CliConfig::default());
+    }
+    let data = std::fs::read_to_string(path)?;
+    let config: CliConfig = toml::from_str(&data)?;
+    Ok(config)
+}
+
+fn resolve_edge(edge: &str, config: &CliConfig) -> String {
+    config
+        .edges
+        .get(edge)
+        .cloned()
+        .unwrap_or_else(|| edge.to_string())
+}
+
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return PathBuf::from(home).join(stripped);
+        }
+    }
+    PathBuf::from(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_cli_config_resolves_edge_aliases() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        let contents = r#"
+hub_url = "https://hub.example"
+
+[edges]
+mel-01 = "edge-mel-01.tailnet:9443"
+"#;
+        std::fs::write(&path, contents).unwrap();
+
+        let config = load_cli_config(path.to_string_lossy().as_ref()).unwrap();
+        assert_eq!(
+            resolve_edge("mel-01", &config),
+            "edge-mel-01.tailnet:9443"
+        );
+        assert_eq!(
+            resolve_edge("http://127.0.0.1:9090", &config),
+            "http://127.0.0.1:9090"
+        );
+    }
+
+    #[test]
+    fn expand_tilde_uses_home_dir() {
+        let Ok(home) = std::env::var("HOME") else {
+            return;
+        };
+        let path = expand_tilde("~/.config/forgemux/config.toml");
+        assert!(path.starts_with(PathBuf::from(home)));
     }
 }
