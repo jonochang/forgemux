@@ -29,6 +29,45 @@ cargo generate-lockfile
 cargo test
 ```
 
+## Quick Start
+
+Start a session in the current repo:
+
+```sh
+fmux start --agent claude --model sonnet --repo .
+```
+
+Start a session in a new git worktree on a new branch (default path):
+
+```sh
+fmux start --worktree --branch my-feature
+```
+
+Override the worktree path:
+
+```sh
+fmux start --worktree --branch my-feature --worktree-path /path/to/worktree
+```
+
+List and attach:
+
+```sh
+fmux ls
+fmux attach S-xxxxxxx
+```
+
+## Hub Config
+
+`fmux edges` and `forgehub` expect a config file (default `./.forgemux-hub.toml`) like:
+
+```toml
+data_dir = "./.forgemux-hub"
+
+[[edges]]
+id = "edge-01"
+data_dir = "/path/to/edge/.forgemux"
+```
+
 ## Layout
 
 - `crates/forgemux-core`: shared types, session state machine, repo root detection

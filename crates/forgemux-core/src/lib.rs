@@ -54,7 +54,7 @@ pub struct SessionId(String);
 impl SessionId {
     pub fn new() -> Self {
         let id = uuid::Uuid::new_v4().simple().to_string();
-        let short = &id[..4];
+        let short = &id[..8];
         Self(format!("S-{}", short))
     }
 
@@ -321,7 +321,7 @@ mod tests {
     fn session_id_has_prefix() {
         let id = SessionId::new();
         assert!(id.as_str().starts_with("S-"));
-        assert_eq!(id.as_str().len(), 6);
+        assert_eq!(id.as_str().len(), 10);
     }
 
     #[test]

@@ -135,6 +135,9 @@ impl<R: CommandRunner> SessionService<R> {
             .unwrap_or(repo_path.to_path_buf());
 
         let (session_root, worktree_info) = if let Some(spec) = worktree {
+            if forgemux_core::RepoRoot::discover(repo_path).is_none() {
+                anyhow::bail!("--worktree requires a git repository");
+            }
             let worktree_path = spec.path.clone().unwrap_or_else(|| {
                 repo_root
                     .join(".forgemux")
@@ -165,6 +168,8 @@ impl<R: CommandRunner> SessionService<R> {
             "-d".to_string(),
             "-s".to_string(),
             record.id.as_str().to_string(),
+            "-c".to_string(),
+            session_root.to_string_lossy().to_string(),
             "--".to_string(),
             agent_cfg.command.clone(),
         ];
@@ -380,7 +385,10 @@ impl<R: CommandRunner> SessionService<R> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let cmd = format!("cat >> {}", path.display());
+        let cmd = format!(
+            "awk '{{ print strftime(\"%Y-%m-%dT%H:%M:%S%z\"), $0 }}' >> {}",
+            path.display()
+        );
         let args = vec![
             "pipe-pane".to_string(),
             "-o".to_string(),

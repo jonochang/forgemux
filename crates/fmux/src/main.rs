@@ -201,9 +201,20 @@ fn main() {
                     }
                 }
             } else {
+                let mut last_content = String::new();
                 loop {
                     match service.logs(&session_id, tail) {
-                        Ok(content) => println!("{content}"),
+                        Ok(content) => {
+                            if content.starts_with(&last_content) {
+                                let delta = &content[last_content.len()..];
+                                if !delta.is_empty() {
+                                    println!("{delta}");
+                                }
+                            } else if content != last_content {
+                                println!("{content}");
+                            }
+                            last_content = content;
+                        }
                         Err(err) => {
                             eprintln!("logs failed: {err}");
                             std::process::exit(1);
