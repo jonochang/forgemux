@@ -368,6 +368,8 @@ dependencies = [
  "clap",
  "forgemux-core",
  "regex",
+ "serde",
+ "serde_json",
  "tempfile",
  "tracing",
  "tracing-subscriber",
