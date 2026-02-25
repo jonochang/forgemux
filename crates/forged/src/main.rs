@@ -49,7 +49,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Health => {
-            println!("{\"status\":\"healthy\"}");
+            println!("{}", r#"{"status":"healthy"}"#);
         }
         Command::Version => {
             println!("forged 0.1.0");
