@@ -802,10 +802,10 @@ The session lives on the edge. Every client connection is ephemeral. Robustness 
 The entire reliable stream layer is built on five message types:
 
 ```
-RESUME(last_event_id)                    Client → Edge
+RESUME(last_event_id, client_id)         Client → Edge
 EVENT(event_id, ts, stream, bytes)       Edge → Client
-INPUT(input_id, bytes)                   Client → Edge
-ACK(input_id)                            Edge → Client
+INPUT(input_id, bytes, client_id)        Client → Edge
+ACK(input_id, client_id)                 Edge → Client
 SNAPSHOT(snapshot_id, event_id, data)    Edge → Client
 ```
 
@@ -831,7 +831,7 @@ sequenceDiagram
     end
 
     alt Reconnect (client has state)
-        C->>E: RESUME(last_seen_event_id=4821)
+        C->>E: RESUME(last_seen_event_id=4821, client_id=abc123)
         E->>E: Check if event 4821 is in ring buffer
         alt Gap is small
             E->>C: EVENT(4822 ... current) — replay missed events
@@ -848,20 +848,20 @@ sequenceDiagram
         H->>C: EVENT(event_id, bytes)
         C->>C: Store last_seen_event_id
 
-        C->>H: INPUT(input_id=17, bytes)
-        H->>E: INPUT(input_id=17, bytes)
+        C->>H: INPUT(input_id=17, bytes, client_id=abc123)
+        H->>E: INPUT(input_id=17, bytes, client_id=abc123)
         E->>E: Dedupe by input_id
         E->>T: Write to tmux input fd (exactly once)
-        E->>H: ACK(input_id=17)
-        H->>C: ACK(input_id=17)
+        E->>H: ACK(input_id=17, client_id=abc123)
+        H->>C: ACK(input_id=17, client_id=abc123)
     end
 
     C->>H: WSS disconnect (network drop)
     Note over E,T: Session continues running. Events accumulate in ring buffer.
     C->>H: WSS reconnect
-    C->>E: RESUME(last_seen_event_id=4821)
+    C->>E: RESUME(last_seen_event_id=4821, client_id=abc123)
     E->>C: EVENT(4822 ... current)
-    Note over C: Client resends any unacked INPUTs
+    Note over C: Client resends any unacked INPUTs with the same client_id
     E->>E: Dedupe, apply new inputs only
 ```
 
@@ -875,6 +875,11 @@ struct OutputEvent {
     ts: DateTime<Utc>,
     stream: Stream,         // Stdout | Stderr
     data: Bytes,            // raw PTY bytes
+}
+
+struct Resume {
+    last_seen_event_id: u64,
+    client_id: String,      // stable per client across reconnects
 }
 ```
 
@@ -893,12 +898,14 @@ Mobile reconnections cause "did my keystroke go through?" ambiguity. The protoco
 
 ```rust
 struct InputMessage {
-    input_id: u64,          // monotonic per client connection
+    input_id: u64,          // monotonic per client_id
+    client_id: String,      // stable per client across reconnects
     data: Bytes,            // keystrokes or line
 }
 
 struct InputAck {
     input_id: u64,
+    client_id: String,
 }
 ```
 
@@ -908,7 +915,7 @@ For every user input:
 3. Edge replies `ACK(input_id)`
 4. Client marks the input as confirmed
 
-On reconnect, the client resends all unacked inputs. The edge deduplicates by `input_id` — if it has already applied that input, it sends `ACK` without re-applying.
+On reconnect, the client resends all unacked inputs using the same `client_id`. The edge deduplicates by `(client_id, input_id)` — if it has already applied that input, it sends `ACK` without re-applying.
 
 **Guarantee: at-most-once input delivery.** No double-sends, no lost keystrokes.
 
@@ -931,7 +938,7 @@ enum SnapshotData {
 }
 ```
 
-Snapshots are captured periodically (every N seconds or M KB of output). Given tmux, the cheap approach — capturing the last 5,000–20,000 lines of rendered text via `tmux capture-pane` — is usually sufficient.
+Snapshots are captured periodically (every N seconds or M KB of output). Given tmux, the cheap approach — capturing the last 5,000–20,000 lines of rendered text via `tmux capture-pane` — is usually sufficient, but it does not preserve full terminal state (alternate screen, attributes). Use `TerminalState` for full fidelity when needed.
 
 On reconnect with a large gap:
 1. Edge sends `SNAPSHOT(latest)`
@@ -986,7 +993,7 @@ graph LR
 
 The edge maintains an **outbound** connection to the hub (edge connects out, so NAT is not an issue). The hub exposes a stable public endpoint. Mobile clients never need to reach the edge directly.
 
-**Optional store-and-forward:** the hub can buffer output events while a client is disconnected. When the client reconnects, the hub replays buffered events before switching to live relay. This makes "edge temporarily offline" survivable for the client — the hub buffers both directions.
+**Optional store-and-forward:** the hub can buffer output events while a client is disconnected. When the client reconnects, the hub replays buffered events before switching to live relay. This makes "edge temporarily offline" survivable for the client — the hub buffers both directions. Buffering is bounded by size/time limits similar to the edge ring buffer; beyond that, the client falls back to snapshot + tail.
 
 ### Bandwidth and Battery Optimisations
 
@@ -1013,7 +1020,7 @@ Guardrails: offline queuing is only enabled when the session is in a "safe" stat
 
 | Guarantee | Mechanism |
 |---|---|
-| **No output loss** | Output is replayable up to retention window (ring buffer + snapshot) |
+| **No output loss (within retention window)** | Output is replayable up to retention window (ring buffer + snapshot); beyond that, snapshot + tail |
 | **At-most-once input** | Inputs applied exactly once via `input_id` deduplication |
 | **Session continuity** | Agent continues running with zero clients attached |
 | **Fast resume** | Snapshot + event tail ensures sub-second catch-up |
