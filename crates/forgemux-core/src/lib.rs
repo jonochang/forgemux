@@ -447,13 +447,13 @@ mod tests {
         let detector = StateDetector::new(
             60,
             10,
-            vec![Regex::new(r\"(?m)^>\\s*$\").unwrap()],
+            vec![Regex::new(r"(?m)^>\s*$").unwrap()],
         );
         let signal = StateSignal {
             process_alive: true,
             exit_code: None,
             last_output_at: Utc::now() - chrono::Duration::seconds(15),
-            recent_output: \">\".to_string(),
+            recent_output: ">".to_string(),
         };
         let state = detector.detect(Utc::now(), &signal);
         assert_eq!(state, SessionState::WaitingInput);
@@ -466,7 +466,7 @@ mod tests {
             process_alive: true,
             exit_code: None,
             last_output_at: Utc::now() - chrono::Duration::seconds(45),
-            recent_output: \"\".to_string(),
+            recent_output: "".to_string(),
         };
         let state = detector.detect(Utc::now(), &signal);
         assert_eq!(state, SessionState::Idle);
@@ -479,7 +479,7 @@ mod tests {
             process_alive: true,
             exit_code: None,
             last_output_at: Utc::now() - chrono::Duration::seconds(5),
-            recent_output: \"\".to_string(),
+            recent_output: "".to_string(),
         };
         let state = detector.detect(Utc::now(), &signal);
         assert_eq!(state, SessionState::Running);
@@ -492,7 +492,7 @@ mod tests {
             process_alive: false,
             exit_code: Some(1),
             last_output_at: Utc::now(),
-            recent_output: \"\".to_string(),
+            recent_output: "".to_string(),
         };
         let state = detector.detect(Utc::now(), &signal);
         assert_eq!(state, SessionState::Errored);
