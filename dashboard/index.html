@@ -48,7 +48,7 @@
     <main>
       <div class="card">
         <strong>Sessions</strong>
-        <div class="muted">Connect to the hub API to list sessions.</div>
+        <div class="muted" id="sessions">Loading sessions...</div>
       </div>
       <div class="card">
         <strong>Terminal</strong>
@@ -56,6 +56,23 @@
       </div>
     </main>
     <script>
+      const sessionsEl = document.getElementById("sessions");
+      fetch("/sessions")
+        .then((res) => res.json())
+        .then((sessions) => {
+          if (!sessions.length) {
+            sessionsEl.textContent = "No sessions found.";
+            return;
+          }
+          const lines = sessions.map(
+            (s) => `${s.id} • ${s.agent} • ${s.model} • ${s.state}`
+          );
+          sessionsEl.textContent = lines.join(" | ");
+        })
+        .catch(() => {
+          sessionsEl.textContent = "Failed to load sessions.";
+        });
+
       const statusEl = document.getElementById("ws-status");
       const protocol = location.protocol === "https:" ? "wss" : "ws";
       const ws = new WebSocket(`${protocol}://${location.host}/ws`);
