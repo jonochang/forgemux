@@ -109,6 +109,7 @@ pub struct ForgedConfig {
     pub snapshot_interval_ms: u64,
     pub policies: HashMap<String, PolicyConfig>,
     pub api_tokens: Vec<String>,
+    pub default_repo: Option<PathBuf>,
 }
 
 impl ForgedConfig {
@@ -118,7 +119,7 @@ impl ForgedConfig {
             AgentType::Claude,
             AgentConfig {
                 command: "claude".to_string(),
-                args: vec![],
+                args: vec!["--dangerously-skip-permissions".to_string()],
                 prompt_patterns: vec![r"(?m)^>\s*$".to_string()],
             },
         );
@@ -153,6 +154,7 @@ impl ForgedConfig {
             snapshot_interval_ms: 30_000,
             policies: HashMap::new(),
             api_tokens: Vec::new(),
+            default_repo: None,
         }
     }
 
@@ -223,6 +225,7 @@ impl ForgedConfig {
         if let Some(api_tokens) = file.api_tokens {
             config.api_tokens = api_tokens;
         }
+        config.default_repo = file.default_repo;
         Ok(config)
     }
 }
@@ -245,6 +248,7 @@ struct ForgedConfigFile {
     pub snapshot_interval_ms: Option<u64>,
     pub policies: Option<HashMap<String, PolicyConfig>>,
     pub api_tokens: Option<Vec<String>>,
+    pub default_repo: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -391,18 +395,25 @@ impl<R: CommandRunner> SessionService<R> {
         if self.is_draining() {
             anyhow::bail!("forged is draining; no new sessions allowed");
         }
-        let repo_path = repo_path.as_ref();
-        let repo_root = forgemux_core::RepoRoot::discover(repo_path)
+        let mut repo_path = repo_path.as_ref().to_path_buf();
+        if repo_path.as_os_str().is_empty() {
+            if let Some(default_repo) = &self.config.default_repo {
+                repo_path = default_repo.clone();
+            } else {
+                anyhow::bail!("repo is required (set default_repo in forged config)");
+            }
+        }
+        let repo_root = forgemux_core::RepoRoot::discover(&repo_path)
             .map(|root| root.path().to_path_buf())
-            .unwrap_or(repo_path.to_path_buf());
+            .unwrap_or(repo_path.clone());
 
         let (session_root, worktree_info) = if let Some(spec) = worktree {
-            if forgemux_core::RepoRoot::discover(repo_path).is_none() {
+            if forgemux_core::RepoRoot::discover(&repo_path).is_none() {
                 anyhow::bail!("--worktree requires a git repository");
             }
             let worktree_path = spec.path.clone().unwrap_or_else(|| {
-                repo_root
-                    .join(".forgemux")
+                self.config
+                    .data_dir
                     .join("worktrees")
                     .join(&spec.branch)
             });
@@ -655,10 +666,13 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn attach_session(&self, id: &str) -> anyhow::Result<()> {
         let id = forgemux_core::SessionId::from(id);
-        let args = vec!["attach-session".to_string(), "-t".to_string(), id.as_str().to_string()];
-        let output = self.runner.run(&self.config.tmux_bin, &args)?;
-        if !output.status.success() {
-            anyhow::bail!("tmux attach failed: {}", String::from_utf8_lossy(&output.stderr));
+        let status = Command::new(&self.config.tmux_bin)
+            .arg("attach-session")
+            .arg("-t")
+            .arg(id.as_str())
+            .status()?;
+        if !status.success() {
+            anyhow::bail!("tmux attach failed");
         }
         Ok(())
     }
@@ -800,15 +814,21 @@ impl<R: CommandRunner> SessionService<R> {
         if let Some(parent) = worktree_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let args = vec![
+        let branch_exists = self.branch_exists(repo_root, branch).unwrap_or(false);
+        let mut args = vec![
             "-C".to_string(),
             repo_root.to_string_lossy().to_string(),
             "worktree".to_string(),
             "add".to_string(),
-            "-b".to_string(),
-            branch.to_string(),
-            worktree_path.to_string_lossy().to_string(),
         ];
+        if !branch_exists {
+            args.push("-b".to_string());
+            args.push(branch.to_string());
+        }
+        args.push(worktree_path.to_string_lossy().to_string());
+        if branch_exists {
+            args.push(branch.to_string());
+        }
         let output = self.runner.run("git", &args)?;
         if !output.status.success() {
             anyhow::bail!(
@@ -817,6 +837,18 @@ impl<R: CommandRunner> SessionService<R> {
             );
         }
         Ok(())
+    }
+
+    fn branch_exists(&self, repo_root: &Path, branch: &str) -> anyhow::Result<bool> {
+        let args = vec![
+            "-C".to_string(),
+            repo_root.to_string_lossy().to_string(),
+            "rev-parse".to_string(),
+            "--verify".to_string(),
+            format!("refs/heads/{}", branch),
+        ];
+        let output = self.runner.run("git", &args)?;
+        Ok(output.status.success())
     }
 
     fn store_worktree_meta(
@@ -1264,6 +1296,30 @@ mod tests {
     }
 
     #[test]
+    fn start_session_uses_default_repo_when_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+
+        let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        config.default_repo = Some(repo.clone());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let record = service
+            .start_session_with_worktree(
+                AgentType::Claude,
+                "sonnet",
+                "",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        assert_eq!(record.repo_root, repo);
+    }
+
+    #[test]
     fn usage_defaults_to_zero() {
         let tmp = tempfile::tempdir().unwrap();
         let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
@@ -1305,6 +1361,7 @@ snapshot_lines = 123
 poll_interval_ms = 10
 snapshot_interval_ms = 999
 api_tokens = ["token-1", "token-2"]
+default_repo = "/tmp/project"
  
 [policies.restricted]
 cpu_shares = 512
@@ -1348,6 +1405,7 @@ args = ["session={{session_id}}"]
         assert_eq!(config.snapshot_interval_ms, 999);
         assert!(config.policies.contains_key("restricted"));
         assert_eq!(config.api_tokens.len(), 2);
+        assert_eq!(config.default_repo, Some(PathBuf::from("/tmp/project")));
         let claude = config.agents.get(&AgentType::Claude).unwrap();
         assert_eq!(claude.command, "claude-custom");
         assert_eq!(claude.args, vec!["--model".to_string(), "haiku".to_string()]);

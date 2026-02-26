@@ -36,8 +36,8 @@ enum Command {
         agent: String,
         #[arg(long, default_value = "sonnet")]
         model: String,
-        #[arg(long, default_value = ".")]
-        repo: String,
+        #[arg(long)]
+        repo: Option<String>,
         #[arg(long)]
         notify: Vec<String>,
         #[arg(long)]
@@ -151,7 +151,7 @@ fn main() {
                     AgentType::Codex => "codex".to_string(),
                 },
                 model,
-                repo,
+                repo: repo.unwrap_or_default(),
                 worktree: worktree_spec.is_some(),
                 branch: worktree_spec.as_ref().map(|spec| spec.branch.clone()),
                 worktree_path: worktree_spec.as_ref().and_then(|spec| {
