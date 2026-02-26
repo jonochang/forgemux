@@ -205,6 +205,7 @@ pub struct StateDetector {
     idle_threshold_secs: i64,
     waiting_threshold_secs: i64,
     prompt_patterns: Vec<Regex>,
+    ansi_re: Regex,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +226,7 @@ impl StateDetector {
             idle_threshold_secs,
             waiting_threshold_secs,
             prompt_patterns,
+            ansi_re: Regex::new(r"\x1b\[[0-9;]*[A-Za-z]").unwrap(),
         }
     }
 
@@ -238,10 +240,11 @@ impl StateDetector {
         }
 
         let idle_secs = (now - signal.last_output_at).num_seconds();
+        let cleaned_output = self.ansi_re.replace_all(&signal.recent_output, "");
         let waiting_prompt = self
             .prompt_patterns
             .iter()
-            .any(|pat| pat.is_match(&signal.recent_output));
+            .any(|pat| pat.is_match(&cleaned_output));
 
         if waiting_prompt && idle_secs >= self.waiting_threshold_secs {
             return SessionState::WaitingInput;
@@ -455,7 +458,7 @@ mod tests {
             process_alive: true,
             exit_code: None,
             last_output_at: Utc::now() - chrono::Duration::seconds(15),
-            recent_output: ">".to_string(),
+            recent_output: "\u{1b}[32m>\u{1b}[0m".to_string(),
         };
         let state = detector.detect(Utc::now(), &signal);
         assert_eq!(state, SessionState::WaitingInput);
