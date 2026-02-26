@@ -24,6 +24,10 @@ enum Command {
     Run,
     Check,
     Sessions,
+    Drain {
+        #[arg(long)]
+        force: bool,
+    },
     Health,
     Version,
 }
@@ -117,6 +121,10 @@ fn main() -> anyhow::Result<()> {
                     println!("{} {:?} {:?}", session.id, session.agent, session.state);
                 }
             }
+        }
+        Command::Drain { force } => {
+            service.drain(force)?;
+            println!("draining");
         }
         Command::Health => {
             println!("{}", r#"{"status":"healthy"}"#);

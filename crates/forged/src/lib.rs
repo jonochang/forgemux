@@ -388,6 +388,9 @@ impl<R: CommandRunner> SessionService<R> {
         notify: Option<Vec<NotificationKind>>,
         policy: Option<String>,
     ) -> anyhow::Result<SessionRecord> {
+        if self.is_draining() {
+            anyhow::bail!("forged is draining; no new sessions allowed");
+        }
         let repo_path = repo_path.as_ref();
         let repo_root = forgemux_core::RepoRoot::discover(repo_path)
             .map(|root| root.path().to_path_buf())
@@ -565,6 +568,26 @@ impl<R: CommandRunner> SessionService<R> {
         record.touch_state(SessionState::Terminated);
         self.store.save(&record)?;
         Ok(())
+    }
+
+    pub fn drain(&self, force: bool) -> anyhow::Result<()> {
+        let path = self.drain_marker();
+        fs::write(path, b"draining")?;
+        if force {
+            let sessions = self.list_sessions()?;
+            for session in sessions {
+                let _ = self.stop_session(session.id.as_str());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.drain_marker().exists()
+    }
+
+    fn drain_marker(&self) -> PathBuf {
+        self.config.data_dir.join("drain")
     }
 
     pub fn foreman_report(&self) -> anyhow::Result<ForemanReport> {
@@ -1250,6 +1273,18 @@ mod tests {
         let record = service.usage("S-TEST").unwrap();
         assert_eq!(record.total_tokens, 0);
         assert_eq!(record.estimated_cost_usd, 0.0);
+    }
+
+    #[test]
+    fn drain_blocks_new_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        service.drain(false).unwrap();
+        let result = service.start_session(AgentType::Claude, "sonnet", tmp.path());
+        assert!(result.is_err());
     }
 
     #[test]

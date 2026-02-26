@@ -23,6 +23,10 @@ enum Command {
     Run,
     Check,
     Sessions,
+    Export {
+        #[arg(long, default_value = "sessions")]
+        kind: String,
+    },
     Version,
 }
 
@@ -92,6 +96,19 @@ fn main() -> anyhow::Result<()> {
                     println!("{} {:?} {:?}", session.id, session.agent, session.state);
                 }
             }
+        }
+        Command::Export { kind } => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let output = match kind.as_str() {
+                "sessions" => {
+                    let sessions = rt.block_on(async { fetch_sessions(&service).await });
+                    serde_json::to_string_pretty(&sessions)?
+                }
+                _ => {
+                    anyhow::bail!("unknown export kind: {kind}");
+                }
+            };
+            println!("{output}");
         }
         Command::Version => println!("forgehub 0.1.0"),
     }
