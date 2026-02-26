@@ -108,6 +108,7 @@ pub struct ForgedConfig {
     pub poll_interval_ms: u64,
     pub snapshot_interval_ms: u64,
     pub policies: HashMap<String, PolicyConfig>,
+    pub api_tokens: Vec<String>,
 }
 
 impl ForgedConfig {
@@ -151,6 +152,7 @@ impl ForgedConfig {
             poll_interval_ms: 250,
             snapshot_interval_ms: 30_000,
             policies: HashMap::new(),
+            api_tokens: Vec::new(),
         }
     }
 
@@ -218,6 +220,9 @@ impl ForgedConfig {
         if let Some(policies) = file.policies {
             config.policies = policies;
         }
+        if let Some(api_tokens) = file.api_tokens {
+            config.api_tokens = api_tokens;
+        }
         Ok(config)
     }
 }
@@ -239,6 +244,7 @@ struct ForgedConfigFile {
     pub poll_interval_ms: Option<u64>,
     pub snapshot_interval_ms: Option<u64>,
     pub policies: Option<HashMap<String, PolicyConfig>>,
+    pub api_tokens: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1218,6 +1224,7 @@ input_dedup_window = 55
 snapshot_lines = 123
 poll_interval_ms = 10
 snapshot_interval_ms = 999
+api_tokens = ["token-1", "token-2"]
  
 [policies.restricted]
 cpu_shares = 512
@@ -1260,6 +1267,7 @@ args = ["session={{session_id}}"]
         assert_eq!(config.poll_interval_ms, 10);
         assert_eq!(config.snapshot_interval_ms, 999);
         assert!(config.policies.contains_key("restricted"));
+        assert_eq!(config.api_tokens.len(), 2);
         let claude = config.agents.get(&AgentType::Claude).unwrap();
         assert_eq!(claude.command, "claude-custom");
         assert_eq!(claude.args, vec!["--model".to_string(), "haiku".to_string()]);

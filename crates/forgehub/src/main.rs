@@ -3,6 +3,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
+    http::HeaderMap,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -49,6 +50,7 @@ fn main() -> anyhow::Result<()> {
         HubConfig {
             data_dir: PathBuf::from("./.forgemux-hub"),
             edges: Vec::new(),
+            tokens: Vec::new(),
         }
     };
     let service = HubService::new(config);
@@ -100,14 +102,27 @@ async fn health() -> Json<serde_json::Value> {
 
 async fn list_sessions(
     State(service): State<Arc<HubService>>,
-) -> Json<Vec<forgemux_core::SessionRecord>> {
-    Json(fetch_sessions(&service).await)
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    (axum::http::StatusCode::OK, Json(fetch_sessions(&service).await)).into_response()
 }
 
 async fn ws_sessions(
     State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if !authorized(&service, &headers, query.token.as_deref()) {
+        return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
     ws.on_upgrade(move |socket| sessions_socket(service, socket))
 }
 
@@ -147,8 +162,18 @@ async fn fetch_sessions(service: &HubService) -> Vec<forgemux_core::SessionRecor
     forgemux_core::sort_sessions(sessions)
 }
 
-async fn list_edges(State(service): State<Arc<HubService>>) -> Json<Vec<EdgeRegistration>> {
-    Json(service.list_registered_edges())
+async fn list_edges(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    (axum::http::StatusCode::OK, Json(service.list_registered_edges())).into_response()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -159,8 +184,16 @@ struct RegisterEdgeRequest {
 
 async fn register_edge(
     State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
     Json(req): Json<RegisterEdgeRequest>,
 ) -> Json<EdgeRegistration> {
+    if !authorized(&service, &headers, None) {
+        return Json(EdgeRegistration {
+            id: "unauthorized".to_string(),
+            addr: "".to_string(),
+            last_seen: chrono::Utc::now(),
+        });
+    }
     Json(service.register_edge(req.id, req.addr))
 }
 
@@ -171,8 +204,12 @@ struct HeartbeatRequest {
 
 async fn heartbeat(
     State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
     Json(req): Json<HeartbeatRequest>,
 ) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
     match service.heartbeat(&req.id) {
         Some(reg) => (axum::http::StatusCode::OK, Json(reg)).into_response(),
         None => (
@@ -185,8 +222,12 @@ async fn heartbeat(
 
 async fn start_session(
     State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
     let Some(edge) = service.pick_edge() else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -214,8 +255,12 @@ async fn start_session(
 
 async fn stop_session(
     State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
     let edges = service.list_registered_edges();
     for edge in edges {
         let url = format!(
@@ -239,8 +284,12 @@ async fn stop_session(
 
 async fn session_logs(
     State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
     let edges = service.list_registered_edges();
     for edge in edges {
         let url = format!(
@@ -267,9 +316,13 @@ async fn session_logs(
 
 async fn session_input(
     State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
     let edges = service.list_registered_edges();
     for edge in edges {
         let url = format!(
@@ -291,7 +344,13 @@ async fn session_input(
         .into_response()
 }
 
-async fn foreman_report(State(service): State<Arc<HubService>>) -> impl IntoResponse {
+async fn foreman_report(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
     let Some(edge) = service.pick_edge() else {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -341,18 +400,45 @@ async fn handle_socket(mut socket: WebSocket) {
 #[derive(Debug, serde::Deserialize)]
 struct AttachQuery {
     edge: Option<String>,
+    token: Option<String>,
 }
 
 async fn ws_attach(
     State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
     Query(query): Query<AttachQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if !authorized(&service, &headers, query.token.as_deref()) {
+        return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
     let ws_url = service
         .resolve_ws_url(query.edge.as_deref())
         .unwrap_or_default();
     ws.on_upgrade(move |socket| relay_ws(ws_url, id, socket))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct AuthQuery {
+    token: Option<String>,
+}
+
+fn authorized(service: &HubService, headers: &HeaderMap, token: Option<&str>) -> bool {
+    if !service.tokens_required() {
+        return true;
+    }
+    if let Some(token) = token {
+        return service.is_token_valid(token);
+    }
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(value) = value.to_str() {
+            if let Some(token) = value.strip_prefix("Bearer ") {
+                return service.is_token_valid(token);
+            }
+        }
+    }
+    false
 }
 
 async fn relay_ws(ws_url: String, id: String, mut client: WebSocket) {
@@ -488,6 +574,7 @@ mod tests {
         let service = Arc::new(HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: Vec::new(),
+            tokens: Vec::new(),
         }));
         let app = Router::new()
             .route("/edges", get(list_edges))
@@ -552,6 +639,7 @@ mod tests {
         let service = Arc::new(HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: Vec::new(),
+            tokens: Vec::new(),
         }));
         service.register_edge("edge-01".to_string(), addr.to_string());
         let app = Router::new()
@@ -588,6 +676,7 @@ mod tests {
         let service = Arc::new(HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: Vec::new(),
+            tokens: Vec::new(),
         }));
         service.register_edge("edge-01".to_string(), addr.to_string());
         let app = Router::new()
@@ -636,6 +725,7 @@ mod tests {
         let service = Arc::new(HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: Vec::new(),
+            tokens: Vec::new(),
         }));
         let app = Router::new()
             .route("/health", get(health))
@@ -672,5 +762,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn routes_require_auth_when_configured() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: Vec::new(),
+            tokens: vec!["secret".to_string()],
+        }));
+        let app = Router::new()
+            .route("/edges", get(list_edges))
+            .with_state(service);
+
+        let response = app
+            .oneshot(Request::builder().uri("/edges").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 }

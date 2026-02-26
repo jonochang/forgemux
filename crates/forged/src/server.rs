@@ -2,8 +2,9 @@ use crate::{stream::StreamMessage, CommandRunner, SessionService, WorktreeSpec};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        Path, Query, State,
     },
+    http::HeaderMap,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -56,15 +57,28 @@ async fn health() -> Json<serde_json::Value> {
 
 async fn list_sessions<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
 ) -> Json<Vec<forgemux_core::SessionRecord>> {
+    if !authorized(&service, &headers, None) {
+        return Json(Vec::new());
+    }
     let sessions = service.refresh_states().unwrap_or_default();
     Json(sessions)
 }
 
 async fn start_session<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
     Json(req): Json<StartRequest>,
 ) -> Result<Json<StartResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
     let agent = match req.agent.as_str() {
         "claude" => AgentType::Claude,
         "codex" => AgentType::Codex,
@@ -141,8 +155,17 @@ async fn start_session<R: CommandRunner + 'static>(
 
 async fn stop_session<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
     match service.stop_session(&id) {
         Ok(()) => Ok(Json(serde_json::json!({ "status": "stopped" }))),
         Err(err) => Err((
@@ -156,8 +179,17 @@ async fn stop_session<R: CommandRunner + 'static>(
 
 async fn session_logs<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
     match service.logs(&id, 200) {
         Ok(content) => Ok(Json(serde_json::json!({ "content": content }))),
         Err(err) => Err((
@@ -176,9 +208,18 @@ struct InputRequest {
 
 async fn session_input<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Json(req): Json<InputRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
     let session_id = forgemux_core::SessionId::from(id.as_str());
     match service.send_keys(&session_id, &req.input) {
         Ok(()) => Ok(Json(serde_json::json!({ "status": "sent" }))),
@@ -193,7 +234,16 @@ async fn session_input<R: CommandRunner + 'static>(
 
 async fn foreman_report<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
 ) -> Result<Json<crate::ForemanReport>, (StatusCode, Json<ErrorResponse>)> {
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
     match service.foreman_report() {
         Ok(report) => Ok(Json(report)),
         Err(err) => Err((
@@ -208,9 +258,39 @@ async fn foreman_report<R: CommandRunner + 'static>(
 async fn ws_attach<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
     Path(id): Path<String>,
+    Query(query): Query<AuthQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if !authorized(&service, &HeaderMap::new(), query.token.as_deref()) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
     ws.on_upgrade(move |socket| handle_ws(service, id, socket))
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthQuery {
+    token: Option<String>,
+}
+
+fn authorized<R: CommandRunner>(
+    service: &SessionService<R>,
+    headers: &HeaderMap,
+    token: Option<&str>,
+) -> bool {
+    if service.config().api_tokens.is_empty() {
+        return true;
+    }
+    if let Some(token) = token {
+        return service.config().api_tokens.iter().any(|t| t == token);
+    }
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(value) = value.to_str() {
+            if let Some(token) = value.strip_prefix("Bearer ") {
+                return service.config().api_tokens.iter().any(|t| t == token);
+            }
+        }
+    }
+    false
 }
 
 async fn handle_ws<R: CommandRunner + 'static>(

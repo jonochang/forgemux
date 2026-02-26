@@ -22,6 +22,8 @@ struct Cli {
     edge: Option<String>,
     #[arg(long)]
     hub: Option<String>,
+    #[arg(long)]
+    token: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -103,6 +105,7 @@ fn main() {
     let cli = Cli::parse();
     let cli_config = load_cli_config(&cli.config).unwrap_or_default();
     let edge_addr = resolve_edge(cli.edge.as_deref(), cli.hub.as_deref(), &cli_config);
+    let token = resolve_token(cli.token.as_deref(), &cli_config);
     let config = ForgedConfig::default_with_data_dir(cli.data_dir);
     let service = SessionService::new(config, OsCommandRunner);
 
@@ -156,7 +159,11 @@ fn main() {
 
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions/start", edge_addr.trim_end_matches('/'));
-            let response = client.post(url).json(&request).send();
+            let mut req = client.post(url).json(&request);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
                     let body = resp.json::<forged::server::StartResponse>().unwrap();
@@ -196,7 +203,11 @@ fn main() {
                 edge_addr.trim_end_matches('/'),
                 session_id
             );
-            let response = client.post(url).send();
+            let mut req = client.post(url);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
@@ -221,7 +232,11 @@ fn main() {
                 edge_addr.trim_end_matches('/'),
                 session_id
             );
-            let response = client.post(url).send();
+            let mut req = client.post(url);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
@@ -242,7 +257,11 @@ fn main() {
         Command::Ls => {
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
-            let response = client.get(url).send();
+            let mut req = client.get(url);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
                     let sessions: Vec<forgemux_core::SessionRecord> = resp.json().unwrap();
@@ -266,7 +285,11 @@ fn main() {
         Command::Status { session_id } => {
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
-            let response = client.get(url).send();
+            let mut req = client.get(url);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
                     let sessions: Vec<forgemux_core::SessionRecord> = resp.json().unwrap();
@@ -313,7 +336,11 @@ fn main() {
                     edge_addr.trim_end_matches('/'),
                     session_id
                 );
-                let response = client.get(url).send();
+                let mut req = client.get(url);
+                if let Some(token) = token.as_deref() {
+                    req = req.bearer_auth(token);
+                }
+                let response = req.send();
                 match response {
                     Ok(resp) if resp.status().is_success() => {
                         let payload: JsonValue = resp.json().unwrap();
@@ -344,7 +371,11 @@ fn main() {
                         edge_addr.trim_end_matches('/'),
                         session_id
                     );
-                    let response = client.get(url).send();
+                    let mut req = client.get(url);
+                    if let Some(token) = token.as_deref() {
+                        req = req.bearer_auth(token);
+                    }
+                    let response = req.send();
                     match response {
                         Ok(resp) if resp.status().is_success() => {
                             let payload: JsonValue = resp.json().unwrap();
@@ -384,7 +415,11 @@ fn main() {
         Command::Watch { interval } => loop {
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
-            let response = client.get(url).send();
+            let mut req = client.get(url);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
                     let sessions: Vec<forgemux_core::SessionRecord> = resp.json().unwrap();
@@ -413,7 +448,11 @@ fn main() {
             };
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/edges", hub_url.trim_end_matches('/'));
-            let response = client.get(url).send();
+            let mut req = client.get(url);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
                     let edges: Vec<forgehub::EdgeRegistration> = resp.json().unwrap();
@@ -494,7 +533,11 @@ fn main() {
         Command::ForemanReport => {
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/foreman/report", edge_addr.trim_end_matches('/'));
-            let response = client.get(url).send();
+            let mut req = client.get(url);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
                     let report: serde_json::Value = resp.json().unwrap();
@@ -517,10 +560,11 @@ fn main() {
                 edge_addr.trim_end_matches('/'),
                 session_id
             );
-            let response = client
-                .post(url)
-                .json(&serde_json::json!({ "input": input }))
-                .send();
+            let mut req = client.post(url).json(&serde_json::json!({ "input": input }));
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
@@ -566,6 +610,7 @@ fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {
 struct CliConfig {
     #[allow(dead_code)]
     pub hub_url: Option<String>,
+    pub token: Option<String>,
     #[serde(default)]
     pub edges: HashMap<String, String>,
 }
@@ -602,6 +647,13 @@ fn resolve_hub(hub: Option<&str>, config: &CliConfig) -> Option<String> {
         return Some(hub.to_string());
     }
     config.hub_url.clone()
+}
+
+fn resolve_token(token: Option<&str>, config: &CliConfig) -> Option<String> {
+    if let Some(token) = token {
+        return Some(token.to_string());
+    }
+    config.token.clone()
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
@@ -648,6 +700,7 @@ mel-01 = "edge-mel-01.tailnet:9443"
     fn resolve_edge_prefers_explicit_hub() {
         let config = CliConfig {
             hub_url: Some("https://hub.local".to_string()),
+            token: None,
             edges: HashMap::new(),
         };
         assert_eq!(
@@ -660,11 +713,25 @@ mel-01 = "edge-mel-01.tailnet:9443"
     fn resolve_hub_prefers_override() {
         let config = CliConfig {
             hub_url: Some("https://hub.local".to_string()),
+            token: None,
             edges: HashMap::new(),
         };
         assert_eq!(
             resolve_hub(Some("http://override:8080"), &config).as_deref(),
             Some("http://override:8080")
+        );
+    }
+
+    #[test]
+    fn resolve_token_prefers_override() {
+        let config = CliConfig {
+            hub_url: None,
+            token: Some("from-config".to_string()),
+            edges: HashMap::new(),
+        };
+        assert_eq!(
+            resolve_token(Some("override"), &config).as_deref(),
+            Some("override")
         );
     }
 

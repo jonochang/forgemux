@@ -25,6 +25,8 @@ pub struct EdgeRegistration {
 pub struct HubConfig {
     pub data_dir: PathBuf,
     pub edges: Vec<HubEdge>,
+    #[serde(default)]
+    pub tokens: Vec<String>,
 }
 
 impl HubConfig {
@@ -52,6 +54,14 @@ impl HubService {
 
     pub fn list_edges(&self) -> Vec<HubEdge> {
         self.config.edges.clone()
+    }
+
+    pub fn tokens_required(&self) -> bool {
+        !self.config.tokens.is_empty()
+    }
+
+    pub fn is_token_valid(&self, token: &str) -> bool {
+        self.config.tokens.iter().any(|t| t == token)
     }
 
     pub fn register_edge(&self, id: String, addr: String) -> EdgeRegistration {
@@ -153,6 +163,7 @@ mod tests {
                     ws_url: None,
                 },
             ],
+            tokens: Vec::new(),
         });
 
         let sessions = service.list_sessions().unwrap();
@@ -166,6 +177,7 @@ mod tests {
         let service = HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: vec![],
+            tokens: Vec::new(),
         });
 
         let reg = service.register_edge("edge-a".to_string(), "127.0.0.1:9000".to_string());
@@ -182,6 +194,7 @@ mod tests {
         let service = HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: vec![],
+            tokens: Vec::new(),
         });
 
         service.register_edge("edge-a".to_string(), "127.0.0.1:9000".to_string());
