@@ -9,11 +9,11 @@ use std::time::Duration;
 #[command(name = "forged")]
 #[command(about = "Forgemux edge daemon", long_about = None)]
 struct Cli {
-    #[arg(long)]
+    #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
-    #[arg(long, default_value = "/etc/forgemux/forged.toml")]
+    #[arg(long, default_value = "/etc/forgemux/forged.toml", global = true)]
     config: PathBuf,
-    #[arg(long, default_value = "127.0.0.1:9090")]
+    #[arg(long, default_value = "127.0.0.1:9090", global = true)]
     bind: String,
     #[command(subcommand)]
     command: Command,
