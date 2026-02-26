@@ -61,6 +61,8 @@ fn main() -> anyhow::Result<()> {
                 .route("/sessions/ws", get(ws_sessions))
                 .route("/sessions/:id/stop", post(stop_session))
                 .route("/sessions/:id/logs", get(session_logs))
+                .route("/sessions/:id/input", post(session_input))
+                .route("/foreman/report", get(foreman_report))
                 .route("/edges", get(list_edges))
                 .route("/edges/register", post(register_edge))
                 .route("/edges/heartbeat", post(heartbeat))
@@ -261,6 +263,58 @@ async fn session_logs(
         .into_response()
 }
 
+async fn session_input(
+    State(service): State<Arc<HubService>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let edges = service.list_registered_edges();
+    for edge in edges {
+        let url = format!(
+            "{}/sessions/{}/input",
+            normalize_http_addr(&edge.addr),
+            id
+        );
+        if let Ok(resp) = reqwest::Client::new().post(url).json(&payload).send().await {
+            if resp.status().is_success() {
+                return (axum::http::StatusCode::OK, Json(serde_json::json!({ "status": "sent" })))
+                    .into_response();
+            }
+        }
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "session not found" })),
+    )
+        .into_response()
+}
+
+async fn foreman_report(State(service): State<Arc<HubService>>) -> impl IntoResponse {
+    let Some(edge) = service.pick_edge() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "no edges registered" })),
+        )
+            .into_response();
+    };
+    let url = format!("{}/foreman/report", normalize_http_addr(&edge.addr));
+    match reqwest::Client::new().get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+            (status, Json(body)).into_response()
+        }
+        Err(err) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
 fn normalize_http_addr(addr: &str) -> String {
     if addr.starts_with("http://") || addr.starts_with("https://") {
         addr.to_string()
@@ -413,5 +467,78 @@ mod tests {
             normalize_http_addr("https://edge.local:9443"),
             "https://edge.local:9443"
         );
+    }
+
+    #[tokio::test]
+    async fn foreman_report_proxies_to_edge() {
+        let edge_app = Router::new().route(
+            "/foreman/report",
+            get(|| async { Json(serde_json::json!({ "ok": true })) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, edge_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: Vec::new(),
+        }));
+        service.register_edge("edge-01".to_string(), addr.to_string());
+        let app = Router::new()
+            .route("/foreman/report", get(foreman_report))
+            .with_state(service);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/foreman/report")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_input_proxies_to_edge() {
+        let edge_app = Router::new().route(
+            "/sessions/:id/input",
+            post(|axum::extract::Path(_id): axum::extract::Path<String>| async {
+                Json(serde_json::json!({ "status": "sent" }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, edge_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: Vec::new(),
+        }));
+        service.register_edge("edge-01".to_string(), addr.to_string());
+        let app = Router::new()
+            .route("/sessions/:id/input", post(session_input))
+            .with_state(service);
+
+        let body = serde_json::json!({ "input": "echo hi" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions/S-1/input")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

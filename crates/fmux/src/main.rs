@@ -86,6 +86,10 @@ enum Command {
     },
     ForemanStatus,
     ForemanReport,
+    Inject {
+        session_id: String,
+        input: String,
+    },
     Version,
 }
 
@@ -484,7 +488,46 @@ fn main() {
             }
         },
         Command::ForemanReport => {
-            println!("foreman report not implemented yet");
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/foreman/report", edge_addr.trim_end_matches('/'));
+            let response = client.get(url).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let report: serde_json::Value = resp.json().unwrap();
+                    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+                }
+                Ok(resp) => {
+                    eprintln!("foreman report failed: {}", resp.status());
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("foreman report failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::Inject { session_id, input } => {
+            let client = reqwest::blocking::Client::new();
+            let url = format!(
+                "{}/sessions/{}/input",
+                edge_addr.trim_end_matches('/'),
+                session_id
+            );
+            let response = client
+                .post(url)
+                .json(&serde_json::json!({ "input": input }))
+                .send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {}
+                Ok(resp) => {
+                    eprintln!("inject failed: {}", resp.status());
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("inject failed: {err}");
+                    std::process::exit(1);
+                }
+            }
         }
         Command::Version => {
             println!("fmux 0.1.0");

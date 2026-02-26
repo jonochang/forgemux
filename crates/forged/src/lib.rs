@@ -297,6 +297,20 @@ pub struct SessionService<R: CommandRunner> {
     stream_manager: stream::StreamManager,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ForemanReport {
+    pub generated_at: DateTime<Utc>,
+    pub sessions: Vec<ForemanSessionSummary>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ForemanSessionSummary {
+    pub id: String,
+    pub agent: AgentType,
+    pub model: String,
+    pub state: SessionState,
+}
+
 impl<R: CommandRunner> SessionService<R> {
     pub fn new(config: ForgedConfig, runner: R) -> Self {
         let store = SessionStore::new(&config.data_dir);
@@ -509,6 +523,23 @@ impl<R: CommandRunner> SessionService<R> {
         record.touch_state(SessionState::Terminated);
         self.store.save(&record)?;
         Ok(())
+    }
+
+    pub fn foreman_report(&self) -> anyhow::Result<ForemanReport> {
+        let sessions = self.list_sessions()?;
+        let summaries = sessions
+            .into_iter()
+            .map(|session| ForemanSessionSummary {
+                id: session.id.as_str().to_string(),
+                agent: session.agent,
+                model: session.model,
+                state: session.state,
+            })
+            .collect();
+        Ok(ForemanReport {
+            generated_at: Utc::now(),
+            sessions: summaries,
+        })
     }
 
     pub fn detach_session(&self, id: &str) -> anyhow::Result<()> {
@@ -1108,6 +1139,20 @@ mod tests {
             .join(format!("{}.json", record.id.as_str()));
         let data = std::fs::read_to_string(prefs_path).unwrap();
         assert!(data.contains("Desktop"));
+    }
+
+    #[test]
+    fn foreman_report_includes_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let _ = service
+            .start_session(AgentType::Claude, "sonnet", tmp.path())
+            .unwrap();
+        let report = service.foreman_report().unwrap();
+        assert_eq!(report.sessions.len(), 1);
     }
 
     #[test]

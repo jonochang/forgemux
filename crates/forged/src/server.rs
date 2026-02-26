@@ -43,6 +43,8 @@ pub fn build_router<R: CommandRunner + 'static>(
         .route("/sessions/start", post(start_session::<R>))
         .route("/sessions/:id/stop", post(stop_session::<R>))
         .route("/sessions/:id/logs", get(session_logs::<R>))
+        .route("/sessions/:id/input", post(session_input::<R>))
+        .route("/foreman/report", get(foreman_report::<R>))
         .route("/sessions/:id/attach", get(ws_attach::<R>))
         .with_state(service)
 }
@@ -150,6 +152,42 @@ async fn session_logs<R: CommandRunner + 'static>(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     match service.logs(&id, 200) {
         Ok(content) => Ok(Json(serde_json::json!({ "content": content }))),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct InputRequest {
+    input: String,
+}
+
+async fn session_input<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    Path(id): Path<String>,
+    Json(req): Json<InputRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    let session_id = forgemux_core::SessionId::from(id.as_str());
+    match service.send_keys(&session_id, &req.input) {
+        Ok(()) => Ok(Json(serde_json::json!({ "status": "sent" }))),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )),
+    }
+}
+
+async fn foreman_report<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+) -> Result<Json<crate::ForemanReport>, (StatusCode, Json<ErrorResponse>)> {
+    match service.foreman_report() {
+        Ok(report) => Ok(Json(report)),
         Err(err) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -343,5 +381,41 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn foreman_report_endpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let service = Arc::new(SessionService::new(config, FakeRunner::default()));
+        let app = build_router(service);
+
+        let response = app
+            .oneshot(Request::builder().uri("/foreman/report").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_input_endpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let service = Arc::new(SessionService::new(config, FakeRunner::default()));
+        let app = build_router(service);
+
+        let body = serde_json::json!({ "input": "echo hi\n" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions/S-TEST/input")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }
