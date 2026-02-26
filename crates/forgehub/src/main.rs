@@ -14,6 +14,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+use std::collections::VecDeque;
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -361,50 +363,115 @@ async fn relay_ws(ws_url: String, id: String, mut client: WebSocket) {
         return;
     }
     let target = format!("{}/sessions/{}/attach", ws_url.trim_end_matches('/'), id);
-    let Ok((mut upstream, _)) = tokio_tungstenite::connect_async(target).await else {
-        let _ = client
-            .send(Message::Text("failed to connect to edge".to_string()))
-            .await;
-        return;
-    };
+    let mut buffer = RelayBuffer::new(256);
+    let mut upstream = None;
 
     loop {
+        if upstream.is_none() {
+            match tokio_tungstenite::connect_async(target.clone()).await {
+                Ok((socket, _)) => {
+                    upstream = Some(socket);
+                    while let Some(msg) = buffer.pop_front() {
+                        if let Some(upstream_socket) = upstream.as_mut() {
+                            let _ = upstream_socket.send(msg).await;
+                        }
+                    }
+                }
+                Err(_) => {
+                    tokio::select! {
+                        msg = client.recv() => {
+                            if let Some(Ok(msg)) = msg {
+                                if let Some(tungstenite_msg) = to_tungstenite(msg) {
+                                    buffer.push(tungstenite_msg);
+                                } else {
+                                    break;
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {}
+                    }
+                    continue;
+                }
+            }
+        }
+
+        let Some(upstream_socket) = upstream.as_mut() else { continue };
         tokio::select! {
             msg = client.recv() => {
                 match msg {
                     Some(Ok(msg)) => {
-                        let tungstenite_msg = match msg {
-                            Message::Text(text) => tokio_tungstenite::tungstenite::Message::Text(text),
-                            Message::Binary(bin) => tokio_tungstenite::tungstenite::Message::Binary(bin),
-                            Message::Close(_) => {
-                                let _ = upstream.close(None).await;
-                                break;
+                        if let Some(tungstenite_msg) = to_tungstenite(msg) {
+                            if upstream_socket.send(tungstenite_msg).await.is_err() {
+                                upstream = None;
                             }
-                            _ => continue,
-                        };
-                        let _ = upstream.send(tungstenite_msg).await;
+                        } else {
+                            let _ = upstream_socket.close(None).await;
+                            break;
+                        }
                     }
                     _ => break,
                 }
             }
-            msg = upstream.next() => {
+            msg = upstream_socket.next() => {
                 match msg {
                     Some(Ok(msg)) => {
-                        let axum_msg = match msg {
-                            tokio_tungstenite::tungstenite::Message::Text(text) => Message::Text(text),
-                            tokio_tungstenite::tungstenite::Message::Binary(bin) => Message::Binary(bin),
-                            tokio_tungstenite::tungstenite::Message::Close(_) => {
-                                let _ = client.close().await;
+                        if let Some(axum_msg) = to_axum(msg) {
+                            if client.send(axum_msg).await.is_err() {
                                 break;
                             }
-                            _ => continue,
-                        };
-                        let _ = client.send(axum_msg).await;
+                        }
                     }
-                    _ => break,
+                    _ => {
+                        upstream = None;
+                    }
                 }
             }
         }
+    }
+}
+
+fn to_tungstenite(msg: Message) -> Option<TungsteniteMessage> {
+    match msg {
+        Message::Text(text) => Some(TungsteniteMessage::Text(text)),
+        Message::Binary(bin) => Some(TungsteniteMessage::Binary(bin)),
+        Message::Close(_) => None,
+        _ => None,
+    }
+}
+
+fn to_axum(msg: TungsteniteMessage) -> Option<Message> {
+    match msg {
+        TungsteniteMessage::Text(text) => Some(Message::Text(text)),
+        TungsteniteMessage::Binary(bin) => Some(Message::Binary(bin)),
+        TungsteniteMessage::Close(_) => None,
+        _ => None,
+    }
+}
+
+struct RelayBuffer {
+    max: usize,
+    queue: VecDeque<TungsteniteMessage>,
+}
+
+impl RelayBuffer {
+    fn new(max: usize) -> Self {
+        Self {
+            max: max.max(1),
+            queue: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, msg: TungsteniteMessage) {
+        if self.queue.len() >= self.max {
+            self.queue.pop_front();
+        }
+        self.queue.push_back(msg);
+    }
+
+    fn pop_front(&mut self) -> Option<TungsteniteMessage> {
+        self.queue.pop_front()
     }
 }
 
@@ -540,5 +607,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn relay_buffer_evicts_oldest() {
+        let mut buffer = RelayBuffer::new(2);
+        buffer.push(TungsteniteMessage::Text("a".to_string()));
+        buffer.push(TungsteniteMessage::Text("b".to_string()));
+        buffer.push(TungsteniteMessage::Text("c".to_string()));
+        let first = buffer.pop_front().unwrap();
+        let second = buffer.pop_front().unwrap();
+        assert_eq!(first, TungsteniteMessage::Text("b".to_string()));
+        assert_eq!(second, TungsteniteMessage::Text("c".to_string()));
     }
 }
