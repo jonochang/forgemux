@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.3 - 2026-02-26
+
+- Fetch remotes before worktree creation and track remote branches when present.
+
 ## 0.1.2 - 2026-02-26
 
 - Added hub/edge token authentication and CLI token support.
