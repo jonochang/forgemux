@@ -398,23 +398,35 @@ fn main() {
             }
             thread::sleep(Duration::from_secs(interval));
         },
-        Command::Edges => match forgehub::HubConfig::load(&cli.hub_config) {
-            Ok(cfg) => {
-                let hub = forgehub::HubService::new(cfg);
-                let edges = hub.list_edges();
-                if edges.is_empty() {
-                    println!("no edges");
-                } else {
-                    for edge in edges {
-                        println!("{} {}", edge.id, edge.data_dir.display());
+        Command::Edges => {
+            let Some(hub_url) = resolve_hub(cli.hub.as_deref(), &cli_config) else {
+                eprintln!("edges failed: no hub configured");
+                std::process::exit(1);
+            };
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/edges", hub_url.trim_end_matches('/'));
+            let response = client.get(url).send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let edges: Vec<forgehub::EdgeRegistration> = resp.json().unwrap();
+                    if edges.is_empty() {
+                        println!("no edges");
+                    } else {
+                        for edge in edges {
+                            println!("{} {}", edge.id, edge.addr);
+                        }
                     }
                 }
+                Ok(resp) => {
+                    eprintln!("edges failed: {}", resp.status());
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("edges failed: {err}");
+                    std::process::exit(1);
+                }
             }
-            Err(err) => {
-                eprintln!("edges failed: {err}");
-                std::process::exit(1);
-            }
-        },
+        }
         Command::ForemanStart {
             agent,
             model,
@@ -538,6 +550,13 @@ fn resolve_edge(edge: Option<&str>, hub: Option<&str>, config: &CliConfig) -> St
     "http://127.0.0.1:9090".to_string()
 }
 
+fn resolve_hub(hub: Option<&str>, config: &CliConfig) -> Option<String> {
+    if let Some(hub) = hub {
+        return Some(hub.to_string());
+    }
+    config.hub_url.clone()
+}
+
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/") {
         if let Ok(home) = std::env::var("HOME") {
@@ -587,6 +606,18 @@ mel-01 = "edge-mel-01.tailnet:9443"
         assert_eq!(
             resolve_edge(None, Some("http://override:8080"), &config),
             "http://override:8080"
+        );
+    }
+
+    #[test]
+    fn resolve_hub_prefers_override() {
+        let config = CliConfig {
+            hub_url: Some("https://hub.local".to_string()),
+            edges: HashMap::new(),
+        };
+        assert_eq!(
+            resolve_hub(Some("http://override:8080"), &config).as_deref(),
+            Some("http://override:8080")
         );
     }
 
