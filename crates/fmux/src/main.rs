@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::io::IsTerminal;
 use std::thread;
 use std::time::Duration;
 
@@ -171,6 +172,10 @@ fn main() {
                 Ok(resp) if resp.status().is_success() => {
                     let body = resp.json::<forged::server::StartResponse>().unwrap();
                     println!("{}", body.session_id);
+                    if let Err(err) = service.attach_session(&body.session_id) {
+                        eprintln!("attach failed: {err}");
+                        std::process::exit(1);
+                    }
                 }
                 Ok(resp) => {
                     let body = resp
@@ -188,6 +193,13 @@ fn main() {
             }
         }
         Command::Attach { session_id } => {
+            if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
+                eprintln!(
+                    "attach requires a TTY. Try: `ssh -t <host>` or `tmux attach -t {}`",
+                    session_id
+                );
+                std::process::exit(1);
+            }
             if let Err(err) = service.attach_session(&session_id) {
                 eprintln!("attach failed: {err}");
                 std::process::exit(1);
