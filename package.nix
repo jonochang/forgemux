@@ -30,6 +30,7 @@ rustPlatform.buildRustPackage {
     openssl
     libgit2
     zlib
+    git
   ];
 
   env = {
