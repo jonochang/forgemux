@@ -620,4 +620,13 @@ mod tests {
         assert_eq!(first, TungsteniteMessage::Text("b".to_string()));
         assert_eq!(second, TungsteniteMessage::Text("c".to_string()));
     }
+
+    #[test]
+    fn dashboard_includes_attach_and_queue() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let html = std::fs::read_to_string(root.join("../..").join("dashboard/index.html")).unwrap();
+        assert!(html.contains("sessions/ws"));
+        assert!(html.contains("sessions/${id}/attach"));
+        assert!(html.contains("pendingInputs"));
+    }
 }
