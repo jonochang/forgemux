@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.1 - 2026-02-26
+## 0.1.2 - 2026-02-26
 
 - Added hub/edge token authentication and CLI token support.
 - Added reliable stream protocol primitives, watch mode, and periodic snapshots.
