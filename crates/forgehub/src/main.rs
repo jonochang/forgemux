@@ -58,6 +58,7 @@ fn main() -> anyhow::Result<()> {
             let app = Router::new()
                 .route("/health", get(health))
                 .route("/sessions", get(list_sessions).post(start_session))
+                .route("/sessions/ws", get(ws_sessions))
                 .route("/sessions/:id/stop", post(stop_session))
                 .route("/sessions/:id/logs", get(session_logs))
                 .route("/edges", get(list_edges))
@@ -96,6 +97,31 @@ async fn health() -> Json<serde_json::Value> {
 async fn list_sessions(
     State(service): State<Arc<HubService>>,
 ) -> Json<Vec<forgemux_core::SessionRecord>> {
+    Json(fetch_sessions(&service).await)
+}
+
+async fn ws_sessions(
+    State(service): State<Arc<HubService>>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| sessions_socket(service, socket))
+}
+
+async fn sessions_socket(service: Arc<HubService>, mut socket: WebSocket) {
+    loop {
+        let sessions = fetch_sessions(&service).await;
+        if socket
+            .send(Message::Text(serde_json::to_string(&sessions).unwrap()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+}
+
+async fn fetch_sessions(service: &HubService) -> Vec<forgemux_core::SessionRecord> {
     let client = reqwest::Client::new();
     let edges = service.list_registered_edges();
     let futures = edges.into_iter().map(|edge| {
@@ -114,7 +140,7 @@ async fn list_sessions(
             }
         }
     }
-    Json(forgemux_core::sort_sessions(sessions))
+    forgemux_core::sort_sessions(sessions)
 }
 
 async fn list_edges(State(service): State<Arc<HubService>>) -> Json<Vec<EdgeRegistration>> {

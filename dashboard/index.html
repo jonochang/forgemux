@@ -7,11 +7,14 @@
     <style>
       :root {
         color-scheme: light;
-        --bg: #f7f5f2;
-        --ink: #1c1b1a;
+        --bg: #f6f1ea;
+        --ink: #1e1a15;
         --accent: #d26a2e;
-        --panel: #ffffff;
-        --border: #e0d8cf;
+        --panel: #fffdf9;
+        --border: #e2d7c9;
+        --terminal: #0f1216;
+        --terminal-ink: #e6e6e6;
+        --muted: #5c5348;
       }
       body {
         margin: 0;
@@ -23,11 +26,14 @@
         padding: 24px;
         border-bottom: 1px solid var(--border);
         background: var(--panel);
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
       }
       main {
         padding: 24px;
         display: grid;
-        gap: 16px;
+        gap: 20px;
       }
       .card {
         background: var(--panel);
@@ -36,56 +42,200 @@
         padding: 16px;
       }
       .muted {
-        color: #5c5348;
+        color: var(--muted);
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1.1fr 1.9fr;
+        gap: 20px;
+      }
+      .session-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .session-row:last-child {
+        border-bottom: none;
+      }
+      .session-row button {
+        margin-left: 8px;
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: #fff;
+        cursor: pointer;
+      }
+      .badge {
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        background: #fce9d8;
+        color: #8a3a10;
+      }
+      .terminal {
+        background: var(--terminal);
+        color: var(--terminal-ink);
+        border-radius: 12px;
+        padding: 16px;
+        height: 420px;
+        overflow: auto;
+        white-space: pre-wrap;
+        font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+        font-size: 13px;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .controls input {
+        flex: 1;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        font-family: inherit;
+      }
+      .controls button {
+        padding: 10px 16px;
+        border-radius: 8px;
+        border: none;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .status {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--muted);
       }
     </style>
   </head>
   <body>
     <header>
       <h1>Forgemux</h1>
-      <div class="muted">Dashboard placeholder</div>
+      <div class="muted">Live sessions and browser attach</div>
     </header>
-    <main>
+    <main class="grid">
       <div class="card">
         <strong>Sessions</strong>
         <div class="muted" id="sessions">Loading sessions...</div>
       </div>
       <div class="card">
-        <strong>Terminal</strong>
-        <div class="muted" id="ws-status">Web terminal attach placeholder (Phase 3).</div>
+        <strong>Attach</strong>
+        <div class="muted" id="attach-help">Select a session to attach.</div>
+        <div class="terminal" id="terminal">Waiting for session...</div>
+        <div class="controls">
+          <input id="input" type="text" placeholder="Send input to session" />
+          <button id="send">Send</button>
+        </div>
+        <div class="status" id="ws-status">WebSocket idle.</div>
       </div>
     </main>
     <script>
       const sessionsEl = document.getElementById("sessions");
-      fetch("/sessions")
-        .then((res) => res.json())
-        .then((sessions) => {
-          if (!sessions.length) {
-            sessionsEl.textContent = "No sessions found.";
-            return;
-          }
-          const lines = sessions.map(
-            (s) => `${s.id} • ${s.agent} • ${s.model} • ${s.state}`
-          );
-          sessionsEl.textContent = lines.join(" | ");
-        })
-        .catch(() => {
-          sessionsEl.textContent = "Failed to load sessions.";
-        });
-
+      const terminalEl = document.getElementById("terminal");
       const statusEl = document.getElementById("ws-status");
-      const protocol = location.protocol === "https:" ? "wss" : "ws";
-      const ws = new WebSocket(`${protocol}://${location.host}/ws`);
-      ws.addEventListener("open", () => {
-        statusEl.textContent = "WebSocket connected.";
-        ws.send("ping");
+      const attachHelp = document.getElementById("attach-help");
+      const inputEl = document.getElementById("input");
+      const sendBtn = document.getElementById("send");
+      let attachSocket = null;
+
+      function renderSessions(sessions) {
+        if (!sessions.length) {
+          sessionsEl.textContent = "No sessions found.";
+          return;
+        }
+        sessionsEl.innerHTML = "";
+        sessions.forEach((session) => {
+          const row = document.createElement("div");
+          row.className = "session-row";
+          row.innerHTML = `
+            <div>
+              <strong>${session.id}</strong>
+              <div class="muted">${session.agent} • ${session.model}</div>
+            </div>
+            <div>
+              <span class="badge">${session.state}</span>
+              <button data-id="${session.id}">Attach</button>
+            </div>
+          `;
+          row.querySelector("button").addEventListener("click", () => {
+            attachSession(session.id);
+          });
+          sessionsEl.appendChild(row);
+        });
+      }
+
+      function attachSession(id) {
+        if (attachSocket) {
+          attachSocket.close();
+        }
+        attachHelp.textContent = `Attached to ${id}`;
+        terminalEl.textContent = "Connecting...";
+        const protocol = location.protocol === "https:" ? "wss" : "ws";
+        attachSocket = new WebSocket(
+          `${protocol}://${location.host}/sessions/${id}/attach`
+        );
+        attachSocket.addEventListener("open", () => {
+          statusEl.textContent = "Attached. Waiting for data...";
+          attachSocket.send(JSON.stringify({ type: "resume", last_seen_event_id: 0 }));
+        });
+        attachSocket.addEventListener("message", (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload.type === "snapshot" || payload.type === "event") {
+              terminalEl.textContent = payload.data;
+              terminalEl.scrollTop = terminalEl.scrollHeight;
+            }
+            if (payload.type === "ack") {
+              statusEl.textContent = `Input ${payload.input_id} acked`;
+            }
+          } catch (e) {
+            terminalEl.textContent = event.data;
+          }
+        });
+        attachSocket.addEventListener("close", () => {
+          statusEl.textContent = "Attach socket closed.";
+        });
+      }
+
+      sendBtn.addEventListener("click", () => {
+        if (!attachSocket || attachSocket.readyState !== WebSocket.OPEN) {
+          statusEl.textContent = "No active session.";
+          return;
+        }
+        const value = inputEl.value;
+        if (!value) return;
+        const inputId = Math.random().toString(36).slice(2);
+        attachSocket.send(
+          JSON.stringify({ type: "input", input_id: inputId, data: value + "\\n" })
+        );
+        statusEl.textContent = `Sent ${inputId}`;
+        inputEl.value = "";
       });
-      ws.addEventListener("message", (event) => {
-        statusEl.textContent = `WebSocket echo: ${event.data}`;
-      });
-      ws.addEventListener("close", () => {
-        statusEl.textContent = "WebSocket disconnected.";
-      });
+
+      function connectSessionsSocket() {
+        const protocol = location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(`${protocol}://${location.host}/sessions/ws`);
+        ws.addEventListener("message", (event) => {
+          try {
+            const sessions = JSON.parse(event.data);
+            renderSessions(sessions);
+          } catch (e) {
+            sessionsEl.textContent = "Failed to parse sessions.";
+          }
+        });
+        ws.addEventListener("close", () => {
+          setTimeout(connectSessionsSocket, 2000);
+        });
+      }
+
+      connectSessionsSocket();
     </script>
   </body>
 </html>
