@@ -436,6 +436,7 @@ dependencies = [
  "clap",
  "forgemux-core",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

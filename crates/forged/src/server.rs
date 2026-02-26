@@ -21,6 +21,7 @@ pub struct StartRequest {
     pub worktree: bool,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
+    pub notify: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -91,7 +92,31 @@ async fn start_session<R: CommandRunner + 'static>(
         None
     };
 
-    match service.start_session_with_worktree(agent, req.model, req.repo, worktree_spec) {
+    let notify = match req.notify {
+        Some(list) => {
+            let mut kinds = Vec::new();
+            for entry in list {
+                let kind = match entry.as_str() {
+                    "desktop" => crate::NotificationKind::Desktop,
+                    "webhook" => crate::NotificationKind::Webhook,
+                    "command" => crate::NotificationKind::Command,
+                    _ => {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(ErrorResponse {
+                                error: format!("unknown notify kind: {entry}"),
+                            }),
+                        ))
+                    }
+                };
+                kinds.push(kind);
+            }
+            Some(kinds)
+        }
+        None => None,
+    };
+
+    match service.start_session_with_worktree(agent, req.model, req.repo, worktree_spec, notify) {
         Ok(record) => Ok(Json(StartResponse {
             session_id: record.id.as_str().to_string(),
         })),
@@ -216,6 +241,35 @@ mod tests {
             "model": "sonnet",
             "repo": ".",
             "worktree": true
+        });
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn start_rejects_unknown_notify_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let service = Arc::new(SessionService::new(config, FakeRunner::default()));
+        let app = build_router(service);
+
+        let body = serde_json::json!({
+            "agent": "claude",
+            "model": "sonnet",
+            "repo": ".",
+            "worktree": false,
+            "notify": ["bogus"]
         });
 
         let response = app

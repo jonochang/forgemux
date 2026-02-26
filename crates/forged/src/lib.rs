@@ -75,6 +75,13 @@ pub enum NotificationHook {
     Command { program: String, args: Vec<String> },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum NotificationKind {
+    Desktop,
+    Webhook,
+    Command,
+}
+
 #[derive(Debug, Clone)]
 pub struct NotificationConfig {
     pub on_waiting_input: Vec<NotificationHook>,
@@ -275,7 +282,7 @@ impl<R: CommandRunner> SessionService<R> {
         model: impl Into<String>,
         repo_path: impl AsRef<Path>,
     ) -> anyhow::Result<SessionRecord> {
-        self.start_session_with_worktree(agent, model, repo_path, None)
+        self.start_session_with_worktree(agent, model, repo_path, None, None)
     }
 
     pub fn start_session_with_worktree(
@@ -284,6 +291,7 @@ impl<R: CommandRunner> SessionService<R> {
         model: impl Into<String>,
         repo_path: impl AsRef<Path>,
         worktree: Option<WorktreeSpec>,
+        notify: Option<Vec<NotificationKind>>,
     ) -> anyhow::Result<SessionRecord> {
         let repo_path = repo_path.as_ref();
         let repo_root = forgemux_core::RepoRoot::discover(repo_path)
@@ -344,6 +352,9 @@ impl<R: CommandRunner> SessionService<R> {
         self.store.save(&record)?;
         if let Some(spec) = worktree_info {
             self.store_worktree_meta(&record.id, &spec)?;
+        }
+        if let Some(kinds) = notify {
+            self.store_notification_prefs(&record.id, &kinds)?;
         }
         Ok(record)
     }
@@ -426,11 +437,13 @@ impl<R: CommandRunner> SessionService<R> {
             };
             let state = detector.detect(Utc::now(), &signal);
             if state != session.state {
+                let allowed = self.load_notification_prefs(&session.id)?;
                 self.notifier.maybe_notify(
                     &self.config.notifications,
                     &self.runner,
                     &session,
                     &state,
+                    allowed.as_deref(),
                 );
                 session.touch_state(state);
                 self.store.save(&session)?;
@@ -669,6 +682,43 @@ impl<R: CommandRunner> SessionService<R> {
         let modified = meta.modified().ok()?;
         Some(system_time_to_chrono(modified))
     }
+
+    fn notification_prefs_path(&self, id: &forgemux_core::SessionId) -> PathBuf {
+        self.config
+            .data_dir
+            .join("notifications")
+            .join(format!("{}.json", id.as_str()))
+    }
+
+    fn store_notification_prefs(
+        &self,
+        id: &forgemux_core::SessionId,
+        kinds: &[NotificationKind],
+    ) -> anyhow::Result<()> {
+        let path = self.notification_prefs_path(id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let prefs = NotificationPrefs {
+            kinds: kinds.to_vec(),
+        };
+        let data = serde_json::to_vec_pretty(&prefs)?;
+        fs::write(path, data)?;
+        Ok(())
+    }
+
+    fn load_notification_prefs(
+        &self,
+        id: &forgemux_core::SessionId,
+    ) -> anyhow::Result<Option<Vec<NotificationKind>>> {
+        let path = self.notification_prefs_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = fs::read(path)?;
+        let prefs: NotificationPrefs = serde_json::from_slice(&data)?;
+        Ok(Some(prefs.kinds))
+    }
 }
 
 fn system_time_to_chrono(time: SystemTime) -> DateTime<Utc> {
@@ -679,6 +729,11 @@ fn system_time_to_chrono(time: SystemTime) -> DateTime<Utc> {
 pub struct WorktreeSpec {
     pub branch: String,
     pub path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct NotificationPrefs {
+    kinds: Vec<NotificationKind>,
 }
 
 #[cfg(test)]
@@ -714,6 +769,7 @@ impl NotificationEngine {
         runner: &R,
         session: &SessionRecord,
         new_state: &SessionState,
+        allowed: Option<&[NotificationKind]>,
     ) {
         let event = match new_state {
             SessionState::WaitingInput => Some(NotificationEvent::WaitingInput),
@@ -734,6 +790,11 @@ impl NotificationEngine {
         };
 
         for hook in hooks {
+            if let Some(kinds) = allowed {
+                if !kinds.contains(&hook.kind()) {
+                    continue;
+                }
+            }
             let _ = send_hook(runner, hook, session, event);
         }
     }
@@ -752,6 +813,15 @@ impl NotificationEngine {
     }
 }
 
+impl NotificationHook {
+    fn kind(&self) -> NotificationKind {
+        match self {
+            NotificationHook::Desktop => NotificationKind::Desktop,
+            NotificationHook::Webhook { .. } => NotificationKind::Webhook,
+            NotificationHook::Command { .. } => NotificationKind::Command,
+        }
+    }
+}
 fn send_hook<R: CommandRunner>(
     runner: &R,
     hook: &NotificationHook,
@@ -775,8 +845,13 @@ fn send_hook<R: CommandRunner>(
                 .collect::<Vec<_>>();
             let _ = runner.run(program, &rendered)?;
         }
-        NotificationHook::Webhook { url: _, template: _ } => {
-            // Webhook integration deferred to async notifier.
+        NotificationHook::Webhook { url, template } => {
+            let body = render_template(template, session, event);
+            let client = reqwest::blocking::Client::new();
+            let resp = client.post(url).body(body).send()?;
+            if !resp.status().is_success() {
+                anyhow::bail!("webhook returned {}", resp.status());
+            }
         }
     }
     Ok(())
@@ -853,8 +928,20 @@ mod tests {
         };
 
         let runner = FakeRunner::default();
-        engine.maybe_notify(&config, &runner, &record, &SessionState::WaitingInput);
-        engine.maybe_notify(&config, &runner, &record, &SessionState::WaitingInput);
+        engine.maybe_notify(
+            &config,
+            &runner,
+            &record,
+            &SessionState::WaitingInput,
+            None,
+        );
+        engine.maybe_notify(
+            &config,
+            &runner,
+            &record,
+            &SessionState::WaitingInput,
+            None,
+        );
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
@@ -875,6 +962,43 @@ mod tests {
         assert!(rendered.contains(record.id.as_str()));
         assert!(rendered.contains("errored"));
         assert!(rendered.contains("Codex"));
+    }
+
+    #[test]
+    fn notification_kinds_filter_hooks() {
+        let engine = NotificationEngine::new();
+        let mut record = SessionRecord::new(
+            AgentType::Claude,
+            "sonnet",
+            PathBuf::from("/tmp"),
+        );
+        record.id = forgemux_core::SessionId::from("S-0002");
+
+        let config = NotificationConfig {
+            on_waiting_input: vec![
+                NotificationHook::Desktop,
+                NotificationHook::Command {
+                    program: "echo".to_string(),
+                    args: vec!["hi".to_string()],
+                },
+            ],
+            on_error: vec![],
+            on_idle_timeout: vec![],
+            debounce_secs: 0,
+        };
+
+        let runner = FakeRunner::default();
+        engine.maybe_notify(
+            &config,
+            &runner,
+            &record,
+            &SessionState::WaitingInput,
+            Some(&[NotificationKind::Command]),
+        );
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0][0], "echo");
     }
 
     #[test]
@@ -914,6 +1038,31 @@ mod tests {
 
         let calls = runner.calls();
         assert!(calls.iter().any(|call| call.contains(&"send-keys".to_string())));
+    }
+
+    #[test]
+    fn start_session_persists_notification_prefs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let record = service
+            .start_session_with_worktree(
+                AgentType::Claude,
+                "sonnet",
+                tmp.path(),
+                None,
+                Some(vec![NotificationKind::Desktop]),
+            )
+            .unwrap();
+
+        let prefs_path = tmp
+            .path()
+            .join("notifications")
+            .join(format!("{}.json", record.id.as_str()));
+        let data = std::fs::read_to_string(prefs_path).unwrap();
+        assert!(data.contains("Desktop"));
     }
 
     #[test]

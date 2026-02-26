@@ -34,7 +34,7 @@ enum Command {
         #[arg(long, default_value = ".")]
         repo: String,
         #[arg(long)]
-        notify: bool,
+        notify: Vec<String>,
         #[arg(long)]
         worktree: bool,
         #[arg(long)]
@@ -108,9 +108,6 @@ fn main() {
             branch,
             worktree_path,
         } => {
-            if notify {
-                eprintln!("warning: --notify requires forged daemon support; falling back to no-op");
-            }
             let agent = match agent.as_str() {
                 "claude" => AgentType::Claude,
                 "codex" => AgentType::Codex,
@@ -144,6 +141,7 @@ fn main() {
                 worktree_path: worktree_spec.as_ref().and_then(|spec| {
                     spec.path.as_ref().map(|p| p.to_string_lossy().to_string())
                 }),
+                notify: if notify.is_empty() { None } else { Some(notify) },
             };
 
             let client = reqwest::blocking::Client::new();
