@@ -144,6 +144,8 @@
       const inputEl = document.getElementById("input");
       const sendBtn = document.getElementById("send");
       let attachSocket = null;
+      let currentSessionId = null;
+      let pendingInputs = [];
 
       function renderSessions(sessions) {
         if (!sessions.length) {
@@ -172,6 +174,7 @@
       }
 
       function attachSession(id) {
+        currentSessionId = id;
         if (attachSocket) {
           attachSocket.close();
         }
@@ -184,6 +187,7 @@
         attachSocket.addEventListener("open", () => {
           statusEl.textContent = "Attached. Waiting for data...";
           attachSocket.send(JSON.stringify({ type: "resume", last_seen_event_id: 0 }));
+          flushPending();
         });
         attachSocket.addEventListener("message", (event) => {
           try {
@@ -201,23 +205,38 @@
         });
         attachSocket.addEventListener("close", () => {
           statusEl.textContent = "Attach socket closed.";
+          if (currentSessionId) {
+            setTimeout(() => attachSession(currentSessionId), 1500);
+          }
         });
       }
 
       sendBtn.addEventListener("click", () => {
-        if (!attachSocket || attachSocket.readyState !== WebSocket.OPEN) {
-          statusEl.textContent = "No active session.";
-          return;
-        }
         const value = inputEl.value;
         if (!value) return;
         const inputId = Math.random().toString(36).slice(2);
-        attachSocket.send(
-          JSON.stringify({ type: "input", input_id: inputId, data: value + "\\n" })
-        );
-        statusEl.textContent = `Sent ${inputId}`;
+        const payload = JSON.stringify({
+          type: "input",
+          input_id: inputId,
+          data: value + "\\n",
+        });
+        if (!attachSocket || attachSocket.readyState !== WebSocket.OPEN) {
+          pendingInputs.push(payload);
+          statusEl.textContent = `Queued ${inputId} (offline)`;
+        } else {
+          attachSocket.send(payload);
+          statusEl.textContent = `Sent ${inputId}`;
+        }
         inputEl.value = "";
       });
+
+      function flushPending() {
+        if (!attachSocket || attachSocket.readyState !== WebSocket.OPEN) return;
+        if (!pendingInputs.length) return;
+        pendingInputs.forEach((payload) => attachSocket.send(payload));
+        pendingInputs = [];
+        statusEl.textContent = "Sent queued inputs.";
+      }
 
       function connectSessionsSocket() {
         const protocol = location.protocol === "https:" ? "wss" : "ws";
