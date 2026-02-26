@@ -457,6 +457,7 @@ dependencies = [
  "clap",
  "forgemux-core",
  "futures-util",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",

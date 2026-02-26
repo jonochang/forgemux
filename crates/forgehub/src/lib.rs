@@ -38,6 +38,7 @@ impl HubConfig {
 pub struct HubService {
     config: HubConfig,
     registry: Arc<Mutex<HashMap<String, EdgeRegistration>>>,
+    round_robin: Arc<Mutex<usize>>,
 }
 
 impl HubService {
@@ -45,6 +46,7 @@ impl HubService {
         Self {
             config,
             registry: Arc::new(Mutex::new(HashMap::new())),
+            round_robin: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -73,6 +75,19 @@ impl HubService {
     pub fn list_registered_edges(&self) -> Vec<EdgeRegistration> {
         let guard = self.registry.lock().unwrap();
         guard.values().cloned().collect()
+    }
+
+    pub fn pick_edge(&self) -> Option<EdgeRegistration> {
+        let guard = self.registry.lock().unwrap();
+        if guard.is_empty() {
+            return None;
+        }
+        let mut idx = self.round_robin.lock().unwrap();
+        let mut edges: Vec<_> = guard.values().cloned().collect();
+        edges.sort_by(|a, b| a.id.cmp(&b.id));
+        let selected = edges.get(*idx % edges.len()).cloned();
+        *idx = idx.saturating_add(1);
+        selected
     }
 
     pub fn resolve_ws_url(&self, edge_id: Option<&str>) -> Option<String> {
@@ -159,5 +174,24 @@ mod tests {
         let hb = service.heartbeat("edge-a").unwrap();
         assert!(hb.last_seen >= before);
         assert_eq!(service.list_registered_edges().len(), 1);
+    }
+
+    #[test]
+    fn hub_service_picks_edges_round_robin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: vec![],
+        });
+
+        service.register_edge("edge-a".to_string(), "127.0.0.1:9000".to_string());
+        service.register_edge("edge-b".to_string(), "127.0.0.1:9001".to_string());
+
+        let first = service.pick_edge().unwrap().id;
+        let second = service.pick_edge().unwrap().id;
+        let third = service.pick_edge().unwrap().id;
+
+        assert_ne!(first, second);
+        assert_eq!(first, third);
     }
 }

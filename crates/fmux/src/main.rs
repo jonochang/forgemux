@@ -18,8 +18,10 @@ struct Cli {
     config: String,
     #[arg(long, default_value = "./.forgemux-hub.toml")]
     hub_config: PathBuf,
-    #[arg(long, default_value = "http://127.0.0.1:9090")]
-    edge: String,
+    #[arg(long)]
+    edge: Option<String>,
+    #[arg(long)]
+    hub: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -94,7 +96,7 @@ fn main() {
 
     let cli = Cli::parse();
     let cli_config = load_cli_config(&cli.config).unwrap_or_default();
-    let edge_addr = resolve_edge(&cli.edge, &cli_config);
+    let edge_addr = resolve_edge(cli.edge.as_deref(), cli.hub.as_deref(), &cli_config);
     let config = ForgedConfig::default_with_data_dir(cli.data_dir);
     let service = SessionService::new(config, OsCommandRunner);
 
@@ -519,12 +521,21 @@ fn load_cli_config(path: &str) -> anyhow::Result<CliConfig> {
     Ok(config)
 }
 
-fn resolve_edge(edge: &str, config: &CliConfig) -> String {
-    config
-        .edges
-        .get(edge)
-        .cloned()
-        .unwrap_or_else(|| edge.to_string())
+fn resolve_edge(edge: Option<&str>, hub: Option<&str>, config: &CliConfig) -> String {
+    if let Some(edge) = edge {
+        return config
+            .edges
+            .get(edge)
+            .cloned()
+            .unwrap_or_else(|| edge.to_string());
+    }
+    if let Some(hub) = hub {
+        return hub.to_string();
+    }
+    if let Some(hub_url) = &config.hub_url {
+        return hub_url.clone();
+    }
+    "http://127.0.0.1:9090".to_string()
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
@@ -554,12 +565,28 @@ mel-01 = "edge-mel-01.tailnet:9443"
 
         let config = load_cli_config(path.to_string_lossy().as_ref()).unwrap();
         assert_eq!(
-            resolve_edge("mel-01", &config),
+            resolve_edge(Some("mel-01"), None, &config),
             "edge-mel-01.tailnet:9443"
         );
         assert_eq!(
-            resolve_edge("http://127.0.0.1:9090", &config),
+            resolve_edge(Some("http://127.0.0.1:9090"), None, &config),
             "http://127.0.0.1:9090"
+        );
+        assert_eq!(
+            resolve_edge(None, None, &config),
+            "https://hub.example"
+        );
+    }
+
+    #[test]
+    fn resolve_edge_prefers_explicit_hub() {
+        let config = CliConfig {
+            hub_url: Some("https://hub.local".to_string()),
+            edges: HashMap::new(),
+        };
+        assert_eq!(
+            resolve_edge(None, Some("http://override:8080"), &config),
+            "http://override:8080"
         );
     }
 

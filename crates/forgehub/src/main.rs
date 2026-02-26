@@ -7,7 +7,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::join_all, SinkExt, StreamExt};
 use clap::{Parser, Subcommand};
 use forgehub::{EdgeRegistration, HubConfig, HubService};
 use std::net::SocketAddr;
@@ -57,7 +57,9 @@ fn main() -> anyhow::Result<()> {
             let shared = Arc::new(service);
             let app = Router::new()
                 .route("/health", get(health))
-                .route("/sessions", get(list_sessions))
+                .route("/sessions", get(list_sessions).post(start_session))
+                .route("/sessions/:id/stop", post(stop_session))
+                .route("/sessions/:id/logs", get(session_logs))
                 .route("/edges", get(list_edges))
                 .route("/edges/register", post(register_edge))
                 .route("/edges/heartbeat", post(heartbeat))
@@ -94,8 +96,25 @@ async fn health() -> Json<serde_json::Value> {
 async fn list_sessions(
     State(service): State<Arc<HubService>>,
 ) -> Json<Vec<forgemux_core::SessionRecord>> {
-    let sessions = service.list_sessions().unwrap_or_default();
-    Json(sessions)
+    let client = reqwest::Client::new();
+    let edges = service.list_registered_edges();
+    let futures = edges.into_iter().map(|edge| {
+        let url = format!("{}/sessions", normalize_http_addr(&edge.addr));
+        let client = client.clone();
+        async move { client.get(url).send().await }
+    });
+    let mut sessions = Vec::new();
+    for response in join_all(futures).await {
+        if let Ok(resp) = response {
+            if resp.status().is_success() {
+                if let Ok(mut edge_sessions) = resp.json::<Vec<forgemux_core::SessionRecord>>().await
+                {
+                    sessions.append(&mut edge_sessions);
+                }
+            }
+        }
+    }
+    Json(forgemux_core::sort_sessions(sessions))
 }
 
 async fn list_edges(State(service): State<Arc<HubService>>) -> Json<Vec<EdgeRegistration>> {
@@ -131,6 +150,96 @@ async fn heartbeat(
             Json(serde_json::json!({ "error": "unknown edge" })),
         )
             .into_response(),
+    }
+}
+
+async fn start_session(
+    State(service): State<Arc<HubService>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    let Some(edge) = service.pick_edge() else {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "no edges registered" })),
+        )
+            .into_response();
+    };
+    let url = format!("{}/sessions/start", normalize_http_addr(&edge.addr));
+    match reqwest::Client::new().post(url).json(&payload).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+            (status, Json(body)).into_response()
+        }
+        Err(err) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn stop_session(
+    State(service): State<Arc<HubService>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let edges = service.list_registered_edges();
+    for edge in edges {
+        let url = format!(
+            "{}/sessions/{}/stop",
+            normalize_http_addr(&edge.addr),
+            id
+        );
+        if let Ok(resp) = reqwest::Client::new().post(url).send().await {
+            if resp.status().is_success() {
+                return (axum::http::StatusCode::OK, Json(serde_json::json!({ "status": "stopped" })))
+                    .into_response();
+            }
+        }
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "session not found" })),
+    )
+        .into_response()
+}
+
+async fn session_logs(
+    State(service): State<Arc<HubService>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    let edges = service.list_registered_edges();
+    for edge in edges {
+        let url = format!(
+            "{}/sessions/{}/logs",
+            normalize_http_addr(&edge.addr),
+            id
+        );
+        if let Ok(resp) = reqwest::Client::new().get(url).send().await {
+            if resp.status().is_success() {
+                let body = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+                return (axum::http::StatusCode::OK, Json(body)).into_response();
+            }
+        }
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "session not found" })),
+    )
+        .into_response()
+}
+
+fn normalize_http_addr(addr: &str) -> String {
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr.to_string()
+    } else {
+        format!("http://{addr}")
     }
 }
 
@@ -266,5 +375,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn normalize_http_addr_adds_scheme() {
+        assert_eq!(
+            normalize_http_addr("127.0.0.1:9000"),
+            "http://127.0.0.1:9000"
+        );
+        assert_eq!(
+            normalize_http_addr("https://edge.local:9443"),
+            "https://edge.local:9443"
+        );
     }
 }
