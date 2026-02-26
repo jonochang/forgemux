@@ -23,6 +23,7 @@ rustPlatform.buildRustPackage {
   nativeBuildInputs = [
     pkg-config
     cmake
+    git
   ];
 
   buildInputs = [
