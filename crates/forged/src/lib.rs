@@ -33,12 +33,18 @@ impl CommandRunner for OsCommandRunner {
 pub struct FakeRunner {
     calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     pub should_fail: bool,
+    overrides: std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, i32)>>>,
 }
 
 #[cfg(test)]
 impl FakeRunner {
     pub fn calls(&self) -> Vec<Vec<String>> {
         self.calls.lock().unwrap().clone()
+    }
+
+    pub fn set_status_for(&self, pattern: &[&str], status_code: i32) {
+        let mut overrides = self.overrides.lock().unwrap();
+        overrides.push((pattern.iter().map(|s| s.to_string()).collect(), status_code));
     }
 }
 
@@ -49,11 +55,20 @@ impl CommandRunner for FakeRunner {
         let mut call = vec![program.to_string()];
         call.extend_from_slice(args);
         self.calls.lock().unwrap().push(call);
-        let status = if self.should_fail {
-            std::process::ExitStatus::from_raw(1)
+        let status_code = if self.should_fail {
+            1
         } else {
-            std::process::ExitStatus::from_raw(0)
+            let overrides = self.overrides.lock().unwrap();
+            let mut code = 0;
+            for (pattern, status_code) in overrides.iter() {
+                if pattern.iter().all(|token| args.contains(token) || program == token) {
+                    code = *status_code;
+                    break;
+                }
+            }
+            code
         };
+        let status = std::process::ExitStatus::from_raw(status_code);
         Ok(Output {
             status,
             stdout: Vec::new(),
@@ -814,7 +829,25 @@ impl<R: CommandRunner> SessionService<R> {
         if let Some(parent) = worktree_path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let fetch_args = vec![
+            "-C".to_string(),
+            repo_root.to_string_lossy().to_string(),
+            "fetch".to_string(),
+            "--prune".to_string(),
+        ];
+        let fetch_output = self.runner.run("git", &fetch_args)?;
+        if !fetch_output.status.success() {
+            anyhow::bail!(
+                "git fetch failed: {}",
+                String::from_utf8_lossy(&fetch_output.stderr)
+            );
+        }
         let branch_exists = self.branch_exists(repo_root, branch).unwrap_or(false);
+        let remote_exists = if branch_exists {
+            false
+        } else {
+            self.remote_branch_exists(repo_root, branch).unwrap_or(false)
+        };
         let mut args = vec![
             "-C".to_string(),
             repo_root.to_string_lossy().to_string(),
@@ -828,6 +861,8 @@ impl<R: CommandRunner> SessionService<R> {
         args.push(worktree_path.to_string_lossy().to_string());
         if branch_exists {
             args.push(branch.to_string());
+        } else if remote_exists {
+            args.push(format!("origin/{}", branch));
         }
         let output = self.runner.run("git", &args)?;
         if !output.status.success() {
@@ -846,6 +881,20 @@ impl<R: CommandRunner> SessionService<R> {
             "rev-parse".to_string(),
             "--verify".to_string(),
             format!("refs/heads/{}", branch),
+        ];
+        let output = self.runner.run("git", &args)?;
+        Ok(output.status.success())
+    }
+
+    fn remote_branch_exists(&self, repo_root: &Path, branch: &str) -> anyhow::Result<bool> {
+        let args = vec![
+            "-C".to_string(),
+            repo_root.to_string_lossy().to_string(),
+            "ls-remote".to_string(),
+            "--exit-code".to_string(),
+            "--heads".to_string(),
+            "origin".to_string(),
+            branch.to_string(),
         ];
         let output = self.runner.run("git", &args)?;
         Ok(output.status.success())
@@ -1208,6 +1257,15 @@ mod tests {
 
         let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
         let runner = FakeRunner::default();
+        runner.set_status_for(
+            &[
+                "git",
+                "rev-parse",
+                "--verify",
+                "refs/heads/test-branch",
+            ],
+            1,
+        );
         let service = SessionService::new(config, runner.clone());
 
         let worktree_path = tmp.path().join("wt");
@@ -1218,8 +1276,20 @@ mod tests {
         let calls = runner.calls();
         assert!(calls.iter().any(|call| {
             call.contains(&"git".to_string())
+                && call.contains(&"fetch".to_string())
+                && call.contains(&"--prune".to_string())
+        }));
+        assert!(calls.iter().any(|call| {
+            call.contains(&"git".to_string())
+                && call.contains(&"ls-remote".to_string())
+                && call.contains(&"origin".to_string())
+        }));
+        assert!(calls.iter().any(|call| {
+            call.contains(&"git".to_string())
                 && call.contains(&"worktree".to_string())
                 && call.contains(&"add".to_string())
+                && call.contains(&"-b".to_string())
+                && call.contains(&"origin/test-branch".to_string())
         }));
     }
 
