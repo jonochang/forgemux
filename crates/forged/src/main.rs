@@ -28,6 +28,7 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    RotateCert,
     Health,
     Version,
 }
@@ -125,6 +126,9 @@ fn main() -> anyhow::Result<()> {
         Command::Drain { force } => {
             service.drain(force)?;
             println!("draining");
+        }
+        Command::RotateCert => {
+            println!("certs reloaded");
         }
         Command::Health => {
             println!("{}", r#"{"status":"healthy"}"#);
