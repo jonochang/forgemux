@@ -631,7 +631,7 @@ fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {
         println!("no sessions");
         return;
     }
-    println!("ID\\tAGENT\\tMODEL\\tSTATE");
+    println!("ID\tAGENT\tMODEL\tSTATE");
     for session in sessions {
         let state = match session.state {
             SessionState::WaitingInput => "waiting",
@@ -642,10 +642,7 @@ fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {
             SessionState::Provisioning => "provisioning",
             SessionState::Starting => "starting",
         };
-        println!(
-            "{}\\t{:?}\\t{}\\t{}",
-            session.id, session.agent, session.model, state
-        );
+        println!("{}\t{:?}\t{}\t{}", session.id, session.agent, session.model, state);
     }
 }
 
