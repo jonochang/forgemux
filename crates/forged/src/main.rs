@@ -2,6 +2,8 @@ use clap::{Parser, Subcommand};
 use forged::{ForgedConfig, OsCommandRunner, SessionService};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::thread;
+use std::time::Duration;
 
 #[derive(Debug, Parser)]
 #[command(name = "forged")]
@@ -44,11 +46,47 @@ fn main() -> anyhow::Result<()> {
     if let Some(data_dir) = cli.data_dir {
         config.data_dir = data_dir;
     }
+    let hub_info = config
+        .hub_url
+        .clone()
+        .map(|hub_url| {
+            let node_id = config
+                .node_id
+                .clone()
+                .unwrap_or_else(|| "edge-unknown".to_string());
+            let advertise_addr = config
+                .advertise_addr
+                .clone()
+                .unwrap_or_else(|| cli.bind.clone());
+            (hub_url, node_id, advertise_addr)
+        });
     let service = SessionService::new(config, OsCommandRunner);
 
     match cli.command {
         Command::Run => {
             let addr: SocketAddr = cli.bind.parse()?;
+            if let Some((hub_url, node_id, advertise_addr)) = hub_info {
+                thread::spawn(move || {
+                    let client = reqwest::blocking::Client::new();
+                    let register_url = format!("{}/edges/register", hub_url.trim_end_matches('/'));
+                    let _ = client
+                        .post(register_url)
+                        .json(&serde_json::json!({
+                            "id": node_id,
+                            "addr": advertise_addr,
+                        }))
+                        .send();
+                    let heartbeat_url =
+                        format!("{}/edges/heartbeat", hub_url.trim_end_matches('/'));
+                    loop {
+                        let _ = client
+                            .post(&heartbeat_url)
+                            .json(&serde_json::json!({ "id": node_id }))
+                            .send();
+                        thread::sleep(Duration::from_secs(10));
+                    }
+                });
+            }
             let app = forged::server::build_router(std::sync::Arc::new(service));
             let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async move {

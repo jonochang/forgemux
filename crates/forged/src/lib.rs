@@ -98,6 +98,9 @@ pub struct ForgedConfig {
     pub waiting_threshold_secs: i64,
     pub agents: HashMap<AgentType, AgentConfig>,
     pub notifications: NotificationConfig,
+    pub node_id: Option<String>,
+    pub hub_url: Option<String>,
+    pub advertise_addr: Option<String>,
 }
 
 impl ForgedConfig {
@@ -132,6 +135,9 @@ impl ForgedConfig {
                 on_idle_timeout: Vec::new(),
                 debounce_secs: 300,
             },
+            node_id: None,
+            hub_url: None,
+            advertise_addr: None,
         }
     }
 
@@ -178,6 +184,9 @@ impl ForgedConfig {
         if let Some(notifications) = file.notifications {
             config.notifications = notifications.into();
         }
+        config.node_id = file.node_id;
+        config.hub_url = file.hub_url;
+        config.advertise_addr = file.advertise_addr;
         Ok(config)
     }
 }
@@ -190,6 +199,9 @@ struct ForgedConfigFile {
     pub waiting_threshold_secs: Option<i64>,
     pub agents: Option<HashMap<String, AgentFile>>,
     pub notifications: Option<NotificationConfigFile>,
+    pub node_id: Option<String>,
+    pub hub_url: Option<String>,
+    pub advertise_addr: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1074,6 +1086,9 @@ data_dir = "/tmp/forgemux-data"
 tmux_bin = "tmux-custom"
 idle_threshold_secs = 120
 waiting_threshold_secs = 25
+node_id = "edge-01"
+hub_url = "http://hub.local:8080"
+advertise_addr = "edge-01.local:9443"
 
 [agents.claude]
 command = "claude-custom"
@@ -1098,6 +1113,12 @@ args = ["session={{session_id}}"]
         assert_eq!(config.tmux_bin, "tmux-custom");
         assert_eq!(config.idle_threshold_secs, 120);
         assert_eq!(config.waiting_threshold_secs, 25);
+        assert_eq!(config.node_id.as_deref(), Some("edge-01"));
+        assert_eq!(config.hub_url.as_deref(), Some("http://hub.local:8080"));
+        assert_eq!(
+            config.advertise_addr.as_deref(),
+            Some("edge-01.local:9443")
+        );
         let claude = config.agents.get(&AgentType::Claude).unwrap();
         assert_eq!(claude.command, "claude-custom");
         assert_eq!(claude.args, vec!["--model".to_string(), "haiku".to_string()]);
