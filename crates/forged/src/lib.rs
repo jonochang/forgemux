@@ -12,6 +12,7 @@ use std::process::{Command, Output};
 use std::time::SystemTime;
 
 pub mod server;
+pub mod checks;
 
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output>;
@@ -262,6 +263,10 @@ impl<R: CommandRunner> SessionService<R> {
             manager,
             notifier: NotificationEngine::new(),
         }
+    }
+
+    pub fn config(&self) -> &ForgedConfig {
+        &self.config
     }
 
     pub fn start_session(

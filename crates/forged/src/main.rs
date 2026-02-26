@@ -57,8 +57,18 @@ fn main() -> anyhow::Result<()> {
             });
         }
         Command::Check => {
-            service.list_sessions()?;
-            println!("ok");
+            let checks = forged::checks::run_checks(&service.config());
+            let mut failed = false;
+            for item in checks {
+                let status = if item.ok { "✓" } else { "✗" };
+                println!("{} {}: {}", status, item.name, item.message);
+                if !item.ok {
+                    failed = true;
+                }
+            }
+            if failed {
+                std::process::exit(1);
+            }
         }
         Command::Sessions => {
             let sessions = service.refresh_states()?;
