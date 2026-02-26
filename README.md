@@ -107,7 +107,7 @@ NixOS config (flake):
 1. Run the hub:
 
 ```sh
-forgehub run --bind 127.0.0.1:8080 --config ./.forgemux-hub.toml
+forgehub --bind 127.0.0.1:8080 --config ./.forgemux-hub.toml run
 ```
 
 2. Run the edge with hub registration:
