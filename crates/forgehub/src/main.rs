@@ -61,11 +61,13 @@ fn main() -> anyhow::Result<()> {
             let shared = Arc::new(service);
             let app = Router::new()
                 .route("/health", get(health))
+                .route("/metrics", get(metrics))
                 .route("/sessions", get(list_sessions).post(start_session))
                 .route("/sessions/ws", get(ws_sessions))
                 .route("/sessions/:id/stop", post(stop_session))
                 .route("/sessions/:id/logs", get(session_logs))
                 .route("/sessions/:id/input", post(session_input))
+                .route("/sessions/:id/usage", get(session_usage))
                 .route("/foreman/report", get(foreman_report))
                 .route("/edges", get(list_edges))
                 .route("/edges/register", post(register_edge))
@@ -112,6 +114,22 @@ async fn list_sessions(
             .into_response();
     }
     (axum::http::StatusCode::OK, Json(fetch_sessions(&service).await)).into_response()
+}
+
+async fn metrics(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let edges = service.list_registered_edges().len();
+    let sessions = fetch_sessions(&service).await.len();
+    let body = format!(
+        "forgemux_edges_total {}\nforgemux_sessions_total {}\n",
+        edges, sessions
+    );
+    (axum::http::StatusCode::OK, body).into_response()
 }
 
 async fn ws_sessions(
@@ -334,6 +352,38 @@ async fn session_input(
             if resp.status().is_success() {
                 return (axum::http::StatusCode::OK, Json(serde_json::json!({ "status": "sent" })))
                     .into_response();
+            }
+        }
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "session not found" })),
+    )
+        .into_response()
+}
+
+async fn session_usage(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+    }
+    let edges = service.list_registered_edges();
+    for edge in edges {
+        let url = format!(
+            "{}/sessions/{}/usage",
+            normalize_http_addr(&edge.addr),
+            id
+        );
+        if let Ok(resp) = reqwest::Client::new().get(url).send().await {
+            if resp.status().is_success() {
+                let body = resp
+                    .json::<serde_json::Value>()
+                    .await
+                    .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+                return (axum::http::StatusCode::OK, Json(body)).into_response();
             }
         }
     }
@@ -698,6 +748,43 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
+    #[tokio::test]
+    async fn session_usage_proxies_to_edge() {
+        let edge_app = Router::new().route(
+            "/sessions/:id/usage",
+            get(|axum::extract::Path(_id): axum::extract::Path<String>| async {
+                Json(serde_json::json!({ "total_tokens": 0 }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, edge_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: Vec::new(),
+            tokens: Vec::new(),
+        }));
+        service.register_edge("edge-01".to_string(), addr.to_string());
+        let app = Router::new()
+            .route("/sessions/:id/usage", get(session_usage))
+            .with_state(service);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/S-1/usage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
     #[test]
     fn relay_buffer_evicts_oldest() {
         let mut buffer = RelayBuffer::new(2);
@@ -731,6 +818,7 @@ mod tests {
             .route("/health", get(health))
             .route("/sessions", get(list_sessions))
             .route("/edges", get(list_edges))
+            .route("/metrics", get(metrics))
             .with_state(service);
 
         let response = app
@@ -757,8 +845,14 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = app
+        let response = app.clone()
             .oneshot(Request::builder().uri("/edges").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);

@@ -94,6 +94,9 @@ enum Command {
         session_id: String,
         input: String,
     },
+    Usage {
+        session_id: String,
+    },
     Version,
 }
 
@@ -573,6 +576,33 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("inject failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::Usage { session_id } => {
+            let client = reqwest::blocking::Client::new();
+            let url = format!(
+                "{}/sessions/{}/usage",
+                edge_addr.trim_end_matches('/'),
+                session_id
+            );
+            let mut req = client.get(url);
+            if let Some(token) = token.as_deref() {
+                req = req.bearer_auth(token);
+            }
+            let response = req.send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let usage: serde_json::Value = resp.json().unwrap();
+                    println!("{}", serde_json::to_string_pretty(&usage).unwrap());
+                }
+                Ok(resp) => {
+                    eprintln!("usage failed: {}", resp.status());
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("usage failed: {err}");
                     std::process::exit(1);
                 }
             }

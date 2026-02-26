@@ -337,6 +337,15 @@ pub struct ForemanSessionSummary {
     pub state: SessionState,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UsageRecord {
+    pub session_id: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub estimated_cost_usd: f64,
+}
+
 impl<R: CommandRunner> SessionService<R> {
     pub fn new(config: ForgedConfig, runner: R) -> Self {
         let store = SessionStore::new(&config.data_dir);
@@ -573,6 +582,30 @@ impl<R: CommandRunner> SessionService<R> {
             generated_at: Utc::now(),
             sessions: summaries,
         })
+    }
+
+    pub fn usage(&self, id: &str) -> anyhow::Result<UsageRecord> {
+        let id = forgemux_core::SessionId::from(id);
+        let path = self.usage_path(&id);
+        if !path.exists() {
+            return Ok(UsageRecord {
+                session_id: id.as_str().to_string(),
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                total_tokens: 0,
+                estimated_cost_usd: 0.0,
+            });
+        }
+        let data = fs::read(path)?;
+        let record: UsageRecord = serde_json::from_slice(&data)?;
+        Ok(record)
+    }
+
+    fn usage_path(&self, id: &forgemux_core::SessionId) -> PathBuf {
+        self.config
+            .data_dir
+            .join("usage")
+            .join(format!("{}.json", id.as_str()))
     }
 
     pub fn detach_session(&self, id: &str) -> anyhow::Result<()> {
@@ -1205,6 +1238,18 @@ mod tests {
             Some("restricted".to_string()),
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn usage_defaults_to_zero() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let record = service.usage("S-TEST").unwrap();
+        assert_eq!(record.total_tokens, 0);
+        assert_eq!(record.estimated_cost_usd, 0.0);
     }
 
     #[test]

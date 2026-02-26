@@ -41,11 +41,13 @@ pub fn build_router<R: CommandRunner + 'static>(
 ) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/metrics", get(metrics::<R>))
         .route("/sessions", get(list_sessions::<R>))
         .route("/sessions/start", post(start_session::<R>))
         .route("/sessions/:id/stop", post(stop_session::<R>))
         .route("/sessions/:id/logs", get(session_logs::<R>))
         .route("/sessions/:id/input", post(session_input::<R>))
+        .route("/sessions/:id/usage", get(session_usage::<R>))
         .route("/foreman/report", get(foreman_report::<R>))
         .route("/sessions/:id/attach", get(ws_attach::<R>))
         .with_state(service)
@@ -53,6 +55,26 @@ pub fn build_router<R: CommandRunner + 'static>(
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "healthy" }))
+}
+
+async fn metrics<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if !authorized(&service, &headers, None) {
+        return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    let sessions = service.list_sessions().unwrap_or_default();
+    let total = sessions.len();
+    let running = sessions
+        .iter()
+        .filter(|s| matches!(s.state, forgemux_core::SessionState::Running))
+        .count();
+    let body = format!(
+        "forgemux_sessions_total {}\nforgemux_sessions_running {}\n",
+        total, running
+    );
+    (StatusCode::OK, body).into_response()
 }
 
 async fn list_sessions<R: CommandRunner + 'static>(
@@ -223,6 +245,30 @@ async fn session_input<R: CommandRunner + 'static>(
     let session_id = forgemux_core::SessionId::from(id.as_str());
     match service.send_keys(&session_id, &req.input) {
         Ok(()) => Ok(Json(serde_json::json!({ "status": "sent" }))),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )),
+    }
+}
+
+async fn session_usage<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<crate::UsageRecord>, (StatusCode, Json<ErrorResponse>)> {
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
+    match service.usage(&id) {
+        Ok(record) => Ok(Json(record)),
         Err(err) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -544,6 +590,39 @@ mod tests {
                     .body(Body::empty())
                     .unwrap(),
             )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_usage_endpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let service = Arc::new(SessionService::new(config, FakeRunner::default()));
+        let app = build_router(service);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/S-TEST/usage")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let service = Arc::new(SessionService::new(config, FakeRunner::default()));
+        let app = build_router(service);
+
+        let response = app
+            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
