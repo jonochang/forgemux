@@ -7,6 +7,7 @@
   openssl,
   libgit2,
   zlib,
+  git,
 }:
 
 rustPlatform.buildRustPackage {
