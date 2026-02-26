@@ -107,6 +107,7 @@ pub struct ForgedConfig {
     pub snapshot_lines: i32,
     pub poll_interval_ms: u64,
     pub snapshot_interval_ms: u64,
+    pub policies: HashMap<String, PolicyConfig>,
 }
 
 impl ForgedConfig {
@@ -149,6 +150,7 @@ impl ForgedConfig {
             snapshot_lines: 5000,
             poll_interval_ms: 250,
             snapshot_interval_ms: 30_000,
+            policies: HashMap::new(),
         }
     }
 
@@ -213,6 +215,9 @@ impl ForgedConfig {
         if let Some(snapshot_interval_ms) = file.snapshot_interval_ms {
             config.snapshot_interval_ms = snapshot_interval_ms;
         }
+        if let Some(policies) = file.policies {
+            config.policies = policies;
+        }
         Ok(config)
     }
 }
@@ -233,6 +238,15 @@ struct ForgedConfigFile {
     pub snapshot_lines: Option<i32>,
     pub poll_interval_ms: Option<u64>,
     pub snapshot_interval_ms: Option<u64>,
+    pub policies: Option<HashMap<String, PolicyConfig>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PolicyConfig {
+    pub cpu_shares: Option<u64>,
+    pub memory_max: Option<String>,
+    pub pids_max: Option<u64>,
+    pub network: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -347,7 +361,7 @@ impl<R: CommandRunner> SessionService<R> {
         model: impl Into<String>,
         repo_path: impl AsRef<Path>,
     ) -> anyhow::Result<SessionRecord> {
-        self.start_session_with_worktree(agent, model, repo_path, None, None)
+        self.start_session_with_worktree(agent, model, repo_path, None, None, None)
     }
 
     pub fn start_session_with_worktree(
@@ -357,6 +371,7 @@ impl<R: CommandRunner> SessionService<R> {
         repo_path: impl AsRef<Path>,
         worktree: Option<WorktreeSpec>,
         notify: Option<Vec<NotificationKind>>,
+        policy: Option<String>,
     ) -> anyhow::Result<SessionRecord> {
         let repo_path = repo_path.as_ref();
         let repo_root = forgemux_core::RepoRoot::discover(repo_path)
@@ -383,6 +398,12 @@ impl<R: CommandRunner> SessionService<R> {
             .manager
             .create_session(agent.clone(), model, &session_root)
             .context("create session record")?;
+        if let Some(policy_name) = policy.clone() {
+            if !self.config.policies.contains_key(&policy_name) {
+                anyhow::bail!("unknown policy: {}", policy_name);
+            }
+            record.policy = Some(policy_name);
+        }
         record.touch_state(SessionState::Starting);
         self.store.save(&record)?;
 
@@ -1136,6 +1157,7 @@ mod tests {
                 tmp.path(),
                 None,
                 Some(vec![NotificationKind::Desktop]),
+                None,
             )
             .unwrap();
 
@@ -1162,6 +1184,24 @@ mod tests {
     }
 
     #[test]
+    fn start_session_rejects_unknown_policy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let result = service.start_session_with_worktree(
+            AgentType::Claude,
+            "sonnet",
+            tmp.path(),
+            None,
+            None,
+            Some("restricted".to_string()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn load_config_overrides_defaults() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("forged.toml");
@@ -1178,6 +1218,12 @@ input_dedup_window = 55
 snapshot_lines = 123
 poll_interval_ms = 10
 snapshot_interval_ms = 999
+ 
+[policies.restricted]
+cpu_shares = 512
+memory_max = "1G"
+pids_max = 128
+network = "none"
 
 [agents.claude]
 command = "claude-custom"
@@ -1213,6 +1259,7 @@ args = ["session={{session_id}}"]
         assert_eq!(config.snapshot_lines, 123);
         assert_eq!(config.poll_interval_ms, 10);
         assert_eq!(config.snapshot_interval_ms, 999);
+        assert!(config.policies.contains_key("restricted"));
         let claude = config.agents.get(&AgentType::Claude).unwrap();
         assert_eq!(claude.command, "claude-custom");
         assert_eq!(claude.args, vec!["--model".to_string(), "haiku".to_string()]);

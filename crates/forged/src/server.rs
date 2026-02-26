@@ -22,6 +22,7 @@ pub struct StartRequest {
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
     pub notify: Option<Vec<String>>,
+    pub policy: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,7 +119,14 @@ async fn start_session<R: CommandRunner + 'static>(
         None => None,
     };
 
-    match service.start_session_with_worktree(agent, req.model, req.repo, worktree_spec, notify) {
+    match service.start_session_with_worktree(
+        agent,
+        req.model,
+        req.repo,
+        worktree_spec,
+        notify,
+        req.policy,
+    ) {
         Ok(record) => Ok(Json(StartResponse {
             session_id: record.id.as_str().to_string(),
         })),

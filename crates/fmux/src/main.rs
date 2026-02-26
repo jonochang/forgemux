@@ -38,6 +38,8 @@ enum Command {
         #[arg(long)]
         notify: Vec<String>,
         #[arg(long)]
+        policy: Option<String>,
+        #[arg(long)]
         worktree: bool,
         #[arg(long)]
         branch: Option<String>,
@@ -110,6 +112,7 @@ fn main() {
             model,
             repo,
             notify,
+            policy,
             worktree,
             branch,
             worktree_path,
@@ -148,6 +151,7 @@ fn main() {
                     spec.path.as_ref().map(|p| p.to_string_lossy().to_string())
                 }),
                 notify: if notify.is_empty() { None } else { Some(notify) },
+                policy,
             };
 
             let client = reqwest::blocking::Client::new();
