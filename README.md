@@ -62,6 +62,46 @@ fmux --edge http://127.0.0.1:9090 ls
 fmux attach S-xxxxxxx
 ```
 
+## Install (NixOS / Nix)
+
+One-line install (flake):
+
+```sh
+nix profile install github:jonochang/forgemux
+```
+
+Or run without installing:
+
+```sh
+nix run github:jonochang/forgemux -- --help
+```
+
+Non-flake install (uses `default.nix` / `package.nix`):
+
+```sh
+nix-env -f . -iA forgemux
+```
+
+NixOS config (flake):
+
+```nix
+{
+  inputs.forgemux.url = "github:jonochang/forgemux";
+  outputs = { self, nixpkgs, forgemux, ... }: {
+    nixosConfigurations.myhost = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        ({ pkgs, ... }: {
+          environment.systemPackages = [
+            forgemux.packages.${pkgs.system}.default
+          ];
+        })
+      ];
+    };
+  };
+}
+```
+
 ## Quick Start (Hub + Dashboard)
 
 1. Run the hub:

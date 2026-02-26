@@ -40,5 +40,6 @@ rustPlatform.buildRustPackage {
     description = "Forgemux - durable agent session manager";
     license = with lib.licenses; [ mit ];
     platforms = lib.platforms.unix;
+    mainProgram = "fmux";
   };
 }
