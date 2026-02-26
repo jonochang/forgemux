@@ -629,4 +629,48 @@ mod tests {
         assert!(html.contains("sessions/${id}/attach"));
         assert!(html.contains("pendingInputs"));
     }
+
+    #[tokio::test]
+    async fn routes_basic_health() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: Vec::new(),
+        }));
+        let app = Router::new()
+            .route("/health", get(health))
+            .route("/sessions", get(list_sessions))
+            .route("/edges", get(list_edges))
+            .with_state(service);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(Request::builder().uri("/edges").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }
