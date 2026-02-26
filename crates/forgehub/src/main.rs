@@ -4,12 +4,12 @@ use axum::{
         Query, State,
     },
     response::IntoResponse,
-    routing::get,
+    routing::{get, post},
     Json, Router,
 };
 use futures_util::{SinkExt, StreamExt};
 use clap::{Parser, Subcommand};
-use forgehub::{HubConfig, HubService};
+use forgehub::{EdgeRegistration, HubConfig, HubService};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,6 +58,9 @@ fn main() -> anyhow::Result<()> {
             let app = Router::new()
                 .route("/health", get(health))
                 .route("/sessions", get(list_sessions))
+                .route("/edges", get(list_edges))
+                .route("/edges/register", post(register_edge))
+                .route("/edges/heartbeat", post(heartbeat))
                 .route("/ws", get(ws_handler))
                 .route("/sessions/:id/attach", get(ws_attach))
                 .fallback_service(ServeDir::new("dashboard"))
@@ -93,6 +96,42 @@ async fn list_sessions(
 ) -> Json<Vec<forgemux_core::SessionRecord>> {
     let sessions = service.list_sessions().unwrap_or_default();
     Json(sessions)
+}
+
+async fn list_edges(State(service): State<Arc<HubService>>) -> Json<Vec<EdgeRegistration>> {
+    Json(service.list_registered_edges())
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RegisterEdgeRequest {
+    id: String,
+    addr: String,
+}
+
+async fn register_edge(
+    State(service): State<Arc<HubService>>,
+    Json(req): Json<RegisterEdgeRequest>,
+) -> Json<EdgeRegistration> {
+    Json(service.register_edge(req.id, req.addr))
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct HeartbeatRequest {
+    id: String,
+}
+
+async fn heartbeat(
+    State(service): State<Arc<HubService>>,
+    Json(req): Json<HeartbeatRequest>,
+) -> impl IntoResponse {
+    match service.heartbeat(&req.id) {
+        Some(reg) => (axum::http::StatusCode::OK, Json(reg)).into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown edge" })),
+        )
+            .into_response(),
+    }
 }
 
 async fn ws_handler(ws: WebSocketUpgrade) -> impl IntoResponse {
@@ -177,5 +216,55 @@ async fn relay_ws(ws_url: String, id: String, mut client: WebSocket) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::util::ServiceExt;
+
+    #[tokio::test]
+    async fn register_and_list_edges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: Vec::new(),
+        }));
+        let app = Router::new()
+            .route("/edges", get(list_edges))
+            .route("/edges/register", post(register_edge))
+            .with_state(service);
+
+        let body = serde_json::json!({
+            "id": "edge-01",
+            "addr": "127.0.0.1:9443"
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/edges/register")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/edges")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 }

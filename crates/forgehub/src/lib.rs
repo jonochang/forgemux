@@ -1,14 +1,24 @@
 use anyhow::Context;
+use chrono::{DateTime, Utc};
 use forgemux_core::{sort_sessions, SessionRecord, SessionStore};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubEdge {
     pub id: String,
     pub data_dir: PathBuf,
     pub ws_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EdgeRegistration {
+    pub id: String,
+    pub addr: String,
+    pub last_seen: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,15 +37,42 @@ impl HubConfig {
 
 pub struct HubService {
     config: HubConfig,
+    registry: Arc<Mutex<HashMap<String, EdgeRegistration>>>,
 }
 
 impl HubService {
     pub fn new(config: HubConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            registry: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     pub fn list_edges(&self) -> Vec<HubEdge> {
         self.config.edges.clone()
+    }
+
+    pub fn register_edge(&self, id: String, addr: String) -> EdgeRegistration {
+        let registration = EdgeRegistration {
+            id: id.clone(),
+            addr,
+            last_seen: Utc::now(),
+        };
+        let mut guard = self.registry.lock().unwrap();
+        guard.insert(id, registration.clone());
+        registration
+    }
+
+    pub fn heartbeat(&self, id: &str) -> Option<EdgeRegistration> {
+        let mut guard = self.registry.lock().unwrap();
+        let entry = guard.get_mut(id)?;
+        entry.last_seen = Utc::now();
+        Some(entry.clone())
+    }
+
+    pub fn list_registered_edges(&self) -> Vec<EdgeRegistration> {
+        let guard = self.registry.lock().unwrap();
+        guard.values().cloned().collect()
     }
 
     pub fn resolve_ws_url(&self, edge_id: Option<&str>) -> Option<String> {
@@ -106,5 +143,21 @@ mod tests {
         let sessions = service.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].state, SessionState::WaitingInput);
+    }
+
+    #[test]
+    fn hub_service_registers_and_heartbeats() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: vec![],
+        });
+
+        let reg = service.register_edge("edge-a".to_string(), "127.0.0.1:9000".to_string());
+        assert_eq!(reg.id, "edge-a");
+        let before = reg.last_seen;
+        let hb = service.heartbeat("edge-a").unwrap();
+        assert!(hb.last_seen >= before);
+        assert_eq!(service.list_registered_edges().len(), 1);
     }
 }
