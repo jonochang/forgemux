@@ -29,7 +29,7 @@ cargo generate-lockfile
 cargo test
 ```
 
-## Quick Start
+## Quick Start (Local Edge)
 
 Run the edge daemon:
 
@@ -62,6 +62,58 @@ fmux --edge http://127.0.0.1:9090 ls
 fmux attach S-xxxxxxx
 ```
 
+## Quick Start (Hub + Dashboard)
+
+1. Run the hub:
+
+```sh
+forgehub run --bind 127.0.0.1:8080 --config ./.forgemux-hub.toml
+```
+
+2. Run the edge with hub registration:
+
+```sh
+forged run --data-dir ./.forgemux --bind 127.0.0.1:9090 --config ./forged.toml
+```
+
+3. Start a session via the hub:
+
+```sh
+fmux --hub http://127.0.0.1:8080 start --agent claude --model sonnet --repo .
+```
+
+4. Open the dashboard:
+
+```sh
+open http://127.0.0.1:8080
+```
+
+The dashboard shows live sessions and allows browser attach.
+
+## Auth Tokens (Optional)
+
+If you set tokens, pass them via `--token` or `Authorization: Bearer`.
+
+Example hub config (`./.forgemux-hub.toml`):
+
+```toml
+data_dir = "./.forgemux-hub"
+tokens = ["dev-token"]
+```
+
+Example edge config (`./forged.toml`):
+
+```toml
+data_dir = "./.forgemux"
+api_tokens = ["dev-token"]
+```
+
+CLI usage:
+
+```sh
+fmux --hub http://127.0.0.1:8080 --token dev-token ls
+```
+
 ## Hub Config
 
 `fmux edges` and `forgehub` expect a config file (default `./.forgemux-hub.toml`) like:
@@ -73,6 +125,20 @@ data_dir = "./.forgemux-hub"
 id = "edge-01"
 data_dir = "/path/to/edge/.forgemux"
 ws_url = "ws://127.0.0.1:9090"
+```
+
+## Useful Commands
+
+```sh
+# Show usage for a session (returns zero until collectors are implemented)
+fmux --edge http://127.0.0.1:9090 usage S-xxxxxxx
+
+# Drain the edge (stop new sessions)
+forged drain
+
+# Metrics endpoints (Prometheus format)
+curl http://127.0.0.1:9090/metrics
+curl http://127.0.0.1:8080/metrics
 ```
 
 ## Layout
