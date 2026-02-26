@@ -48,7 +48,7 @@ pub enum InterventionLevel {
     Autonomous,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
 
 impl SessionId {

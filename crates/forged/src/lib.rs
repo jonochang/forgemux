@@ -13,6 +13,7 @@ use std::time::SystemTime;
 
 pub mod server;
 pub mod checks;
+pub mod stream;
 
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output>;
@@ -101,6 +102,10 @@ pub struct ForgedConfig {
     pub node_id: Option<String>,
     pub hub_url: Option<String>,
     pub advertise_addr: Option<String>,
+    pub event_ring_capacity: usize,
+    pub input_dedup_window: usize,
+    pub snapshot_lines: i32,
+    pub poll_interval_ms: u64,
 }
 
 impl ForgedConfig {
@@ -138,6 +143,10 @@ impl ForgedConfig {
             node_id: None,
             hub_url: None,
             advertise_addr: None,
+            event_ring_capacity: 512,
+            input_dedup_window: 1000,
+            snapshot_lines: 5000,
+            poll_interval_ms: 250,
         }
     }
 
@@ -187,6 +196,18 @@ impl ForgedConfig {
         config.node_id = file.node_id;
         config.hub_url = file.hub_url;
         config.advertise_addr = file.advertise_addr;
+        if let Some(event_ring_capacity) = file.event_ring_capacity {
+            config.event_ring_capacity = event_ring_capacity;
+        }
+        if let Some(input_dedup_window) = file.input_dedup_window {
+            config.input_dedup_window = input_dedup_window;
+        }
+        if let Some(snapshot_lines) = file.snapshot_lines {
+            config.snapshot_lines = snapshot_lines;
+        }
+        if let Some(poll_interval_ms) = file.poll_interval_ms {
+            config.poll_interval_ms = poll_interval_ms;
+        }
         Ok(config)
     }
 }
@@ -202,6 +223,10 @@ struct ForgedConfigFile {
     pub node_id: Option<String>,
     pub hub_url: Option<String>,
     pub advertise_addr: Option<String>,
+    pub event_ring_capacity: Option<usize>,
+    pub input_dedup_window: Option<usize>,
+    pub snapshot_lines: Option<i32>,
+    pub poll_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -269,23 +294,31 @@ pub struct SessionService<R: CommandRunner> {
     store: SessionStore,
     manager: SessionManager,
     notifier: NotificationEngine,
+    stream_manager: stream::StreamManager,
 }
 
 impl<R: CommandRunner> SessionService<R> {
     pub fn new(config: ForgedConfig, runner: R) -> Self {
         let store = SessionStore::new(&config.data_dir);
         let manager = SessionManager::new(store.clone());
+        let ring_capacity = config.event_ring_capacity;
+        let dedup_window = config.input_dedup_window;
         Self {
             config,
             runner,
             store,
             manager,
             notifier: NotificationEngine::new(),
+            stream_manager: stream::StreamManager::new(ring_capacity, dedup_window),
         }
     }
 
     pub fn config(&self) -> &ForgedConfig {
         &self.config
+    }
+
+    pub fn stream_manager(&self) -> stream::StreamManager {
+        self.stream_manager.clone()
     }
 
     pub fn start_session(
@@ -1089,6 +1122,10 @@ waiting_threshold_secs = 25
 node_id = "edge-01"
 hub_url = "http://hub.local:8080"
 advertise_addr = "edge-01.local:9443"
+event_ring_capacity = 42
+input_dedup_window = 55
+snapshot_lines = 123
+poll_interval_ms = 10
 
 [agents.claude]
 command = "claude-custom"
@@ -1119,6 +1156,10 @@ args = ["session={{session_id}}"]
             config.advertise_addr.as_deref(),
             Some("edge-01.local:9443")
         );
+        assert_eq!(config.event_ring_capacity, 42);
+        assert_eq!(config.input_dedup_window, 55);
+        assert_eq!(config.snapshot_lines, 123);
+        assert_eq!(config.poll_interval_ms, 10);
         let claude = config.agents.get(&AgentType::Claude).unwrap();
         assert_eq!(claude.command, "claude-custom");
         assert_eq!(claude.args, vec!["--model".to_string(), "haiku".to_string()]);

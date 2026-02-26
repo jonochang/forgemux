@@ -1,4 +1,4 @@
-use crate::{CommandRunner, SessionService, WorktreeSpec};
+use crate::{stream::StreamMessage, CommandRunner, SessionService, WorktreeSpec};
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
@@ -173,35 +173,94 @@ async fn handle_ws<R: CommandRunner + 'static>(
     mut socket: WebSocket,
 ) {
     let session_id = forgemux_core::SessionId::from(id.as_str());
+    let manager = service.stream_manager();
     let mut last_snapshot = String::new();
+    let mut last_seen = 0u64;
 
-    loop {
-        if let Ok(snapshot) = service.capture_output(&session_id, 200) {
-            if snapshot != last_snapshot {
-                if socket.send(Message::Text(snapshot.clone())).await.is_err() {
-                    break;
-                }
-                last_snapshot = snapshot;
+    if let Ok(Some(Ok(msg))) = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        socket.recv(),
+    )
+    .await
+    {
+        if let Message::Text(text) = msg {
+            if let Ok(StreamMessage::Resume { last_seen_event_id }) =
+                serde_json::from_str::<StreamMessage>(&text)
+            {
+                last_seen = last_seen_event_id.unwrap_or(0);
             }
         }
+    }
 
-        if let Ok(Some(Ok(msg))) = tokio::time::timeout(
-            std::time::Duration::from_millis(200),
-            socket.recv(),
-        )
-        .await
+    if let Ok(snapshot) = service.capture_output(&session_id, service.config().snapshot_lines) {
+        let snapshot_id = manager.latest_event_id(&session_id);
+        let payload = StreamMessage::Snapshot {
+            snapshot_id,
+            data: snapshot.clone(),
+        };
+        let _ = socket
+            .send(Message::Text(serde_json::to_string(&payload).unwrap()))
+            .await;
+        last_snapshot = snapshot;
+    }
+
+    for event in manager.events_since(&session_id, last_seen) {
+        let payload = StreamMessage::Event {
+            event_id: event.id,
+            data: event.data,
+        };
+        if socket
+            .send(Message::Text(serde_json::to_string(&payload).unwrap()))
+            .await
+            .is_err()
         {
-            match msg {
-                Message::Text(text) => {
-                    let _ = service.send_keys(&session_id, &text);
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(StreamMessage::Input { input_id, data }) =
+                            serde_json::from_str::<StreamMessage>(&text)
+                        {
+                            if manager.accept_input(&session_id, &input_id) {
+                                let _ = service.send_keys(&session_id, &data);
+                            }
+                            let ack = StreamMessage::Ack { input_id };
+                            let _ = socket.send(Message::Text(serde_json::to_string(&ack).unwrap())).await;
+                        }
+                    }
+                    Some(Ok(Message::Binary(bytes))) => {
+                        if let Ok(text) = String::from_utf8(bytes) {
+                            if let Ok(StreamMessage::Input { input_id, data }) =
+                                serde_json::from_str::<StreamMessage>(&text)
+                            {
+                                if manager.accept_input(&session_id, &input_id) {
+                                    let _ = service.send_keys(&session_id, &data);
+                                }
+                                let ack = StreamMessage::Ack { input_id };
+                                let _ = socket.send(Message::Text(serde_json::to_string(&ack).unwrap())).await;
+                            }
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
                 }
-                Message::Binary(bytes) => {
-                    if let Ok(text) = String::from_utf8(bytes) {
-                        let _ = service.send_keys(&session_id, &text);
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(service.config().poll_interval_ms)) => {
+                if let Ok(snapshot) = service.capture_output(&session_id, service.config().snapshot_lines) {
+                    if snapshot != last_snapshot {
+                        let event = manager.push_event(&session_id, snapshot.clone());
+                        let payload = StreamMessage::Event { event_id: event.id, data: event.data };
+                        if socket.send(Message::Text(serde_json::to_string(&payload).unwrap())).await.is_err() {
+                            break;
+                        }
+                        last_snapshot = snapshot;
                     }
                 }
-                Message::Close(_) => break,
-                _ => {}
             }
         }
     }
