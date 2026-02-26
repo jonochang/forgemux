@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamMessage {
-    Resume { last_seen_event_id: Option<u64> },
+    Resume { last_seen_event_id: Option<u64>, mode: Option<String> },
     Event { event_id: u64, data: String },
     Input { input_id: String, data: String },
     Ack { input_id: String },

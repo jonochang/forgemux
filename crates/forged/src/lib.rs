@@ -106,6 +106,7 @@ pub struct ForgedConfig {
     pub input_dedup_window: usize,
     pub snapshot_lines: i32,
     pub poll_interval_ms: u64,
+    pub snapshot_interval_ms: u64,
 }
 
 impl ForgedConfig {
@@ -147,6 +148,7 @@ impl ForgedConfig {
             input_dedup_window: 1000,
             snapshot_lines: 5000,
             poll_interval_ms: 250,
+            snapshot_interval_ms: 30_000,
         }
     }
 
@@ -208,6 +210,9 @@ impl ForgedConfig {
         if let Some(poll_interval_ms) = file.poll_interval_ms {
             config.poll_interval_ms = poll_interval_ms;
         }
+        if let Some(snapshot_interval_ms) = file.snapshot_interval_ms {
+            config.snapshot_interval_ms = snapshot_interval_ms;
+        }
         Ok(config)
     }
 }
@@ -227,6 +232,7 @@ struct ForgedConfigFile {
     pub input_dedup_window: Option<usize>,
     pub snapshot_lines: Option<i32>,
     pub poll_interval_ms: Option<u64>,
+    pub snapshot_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1171,6 +1177,7 @@ event_ring_capacity = 42
 input_dedup_window = 55
 snapshot_lines = 123
 poll_interval_ms = 10
+snapshot_interval_ms = 999
 
 [agents.claude]
 command = "claude-custom"
@@ -1205,6 +1212,7 @@ args = ["session={{session_id}}"]
         assert_eq!(config.input_dedup_window, 55);
         assert_eq!(config.snapshot_lines, 123);
         assert_eq!(config.poll_interval_ms, 10);
+        assert_eq!(config.snapshot_interval_ms, 999);
         let claude = config.agents.get(&AgentType::Claude).unwrap();
         assert_eq!(claude.command, "claude-custom");
         assert_eq!(claude.args, vec!["--model".to_string(), "haiku".to_string()]);

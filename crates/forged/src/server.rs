@@ -214,6 +214,7 @@ async fn handle_ws<R: CommandRunner + 'static>(
     let manager = service.stream_manager();
     let mut last_snapshot = String::new();
     let mut last_seen = 0u64;
+    let mut control_mode = true;
 
     if let Ok(Some(Ok(msg))) = tokio::time::timeout(
         std::time::Duration::from_secs(1),
@@ -222,10 +223,13 @@ async fn handle_ws<R: CommandRunner + 'static>(
     .await
     {
         if let Message::Text(text) = msg {
-            if let Ok(StreamMessage::Resume { last_seen_event_id }) =
+            if let Ok(StreamMessage::Resume { last_seen_event_id, mode }) =
                 serde_json::from_str::<StreamMessage>(&text)
             {
                 last_seen = last_seen_event_id.unwrap_or(0);
+                if let Some(mode) = mode {
+                    control_mode = mode != "watch";
+                }
             }
         }
     }
@@ -256,6 +260,9 @@ async fn handle_ws<R: CommandRunner + 'static>(
         }
     }
 
+    let mut snapshot_tick =
+        tokio::time::interval(std::time::Duration::from_millis(service.config().snapshot_interval_ms));
+
     loop {
         tokio::select! {
             msg = socket.recv() => {
@@ -264,7 +271,7 @@ async fn handle_ws<R: CommandRunner + 'static>(
                         if let Ok(StreamMessage::Input { input_id, data }) =
                             serde_json::from_str::<StreamMessage>(&text)
                         {
-                            if manager.accept_input(&session_id, &input_id) {
+                            if control_mode && manager.accept_input(&session_id, &input_id) {
                                 let _ = service.send_keys(&session_id, &data);
                             }
                             let ack = StreamMessage::Ack { input_id };
@@ -276,7 +283,7 @@ async fn handle_ws<R: CommandRunner + 'static>(
                             if let Ok(StreamMessage::Input { input_id, data }) =
                                 serde_json::from_str::<StreamMessage>(&text)
                             {
-                                if manager.accept_input(&session_id, &input_id) {
+                                if control_mode && manager.accept_input(&session_id, &input_id) {
                                     let _ = service.send_keys(&session_id, &data);
                                 }
                                 let ack = StreamMessage::Ack { input_id };
@@ -297,6 +304,15 @@ async fn handle_ws<R: CommandRunner + 'static>(
                             break;
                         }
                         last_snapshot = snapshot;
+                    }
+                }
+            }
+            _ = snapshot_tick.tick() => {
+                if let Ok(snapshot) = service.capture_output(&session_id, service.config().snapshot_lines) {
+                    let snapshot_id = manager.latest_event_id(&session_id);
+                    let payload = StreamMessage::Snapshot { snapshot_id, data: snapshot };
+                    if socket.send(Message::Text(serde_json::to_string(&payload).unwrap())).await.is_err() {
+                        break;
                     }
                 }
             }
