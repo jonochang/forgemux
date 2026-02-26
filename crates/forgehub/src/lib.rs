@@ -24,6 +24,7 @@ pub struct EdgeRegistration {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubConfig {
     pub data_dir: PathBuf,
+    #[serde(default)]
     pub edges: Vec<HubEdge>,
     #[serde(default)]
     pub tokens: Vec<String>,
@@ -132,6 +133,7 @@ impl HubService {
 mod tests {
     use super::*;
     use forgemux_core::{AgentType, SessionRecord, SessionState};
+    use tempfile::tempdir;
 
     #[test]
     fn hub_service_aggregates_sessions() {
@@ -206,5 +208,16 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(first, third);
+    }
+
+    #[test]
+    fn load_config_allows_missing_edges() {
+        let tmp = tempdir().unwrap();
+        let cfg_path = tmp.path().join("hub.toml");
+        fs::write(&cfg_path, "data_dir = \"./.forgemux-hub\"\n").unwrap();
+        let cfg = HubConfig::load(&cfg_path).unwrap();
+        assert_eq!(cfg.data_dir, PathBuf::from("./.forgemux-hub"));
+        assert!(cfg.edges.is_empty());
+        assert!(cfg.tokens.is_empty());
     }
 }
