@@ -31,6 +31,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(alias = "s")]
     Start {
         #[arg(long, default_value = "claude")]
         agent: String,
@@ -42,9 +43,9 @@ enum Command {
         notify: Vec<String>,
         #[arg(long)]
         policy: Option<String>,
-        #[arg(long)]
+        #[arg(long, short = 'w')]
         worktree: bool,
-        #[arg(long)]
+        #[arg(long, short = 'b')]
         branch: Option<String>,
         #[arg(long)]
         worktree_path: Option<String>,
