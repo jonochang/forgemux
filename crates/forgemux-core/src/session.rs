@@ -1,0 +1,448 @@
+use crate::repo::RepoRoot;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::path::{Path, PathBuf};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum CoreError {
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("serde error: {0}")]
+    Serde(#[from] serde_json::Error),
+    #[error("session not found: {0}")]
+    SessionNotFound(String),
+    #[error("session version mismatch: expected {expected}, found {actual}")]
+    VersionMismatch { expected: u64, actual: u64 },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum AgentType {
+    Claude,
+    Codex,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum AgentEvent {
+    StateChange {
+        ts: DateTime<Utc>,
+        session_id: String,
+        from: SessionState,
+        to: SessionState,
+    },
+    UserInput {
+        ts: DateTime<Utc>,
+        session_id: String,
+        bytes: usize,
+    },
+    NotificationDelivery {
+        ts: DateTime<Utc>,
+        session_id: String,
+        event: String,
+        hook: String,
+        attempt: u32,
+        success: bool,
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionState {
+    Provisioning,
+    Starting,
+    Running,
+    Idle,
+    WaitingInput,
+    Errored,
+    Unreachable,
+    Terminated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SessionRole {
+    Worker,
+    Foreman {
+        watch_scope: Vec<String>,
+        intervention: InterventionLevel,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InterventionLevel {
+    Advisory,
+    Assisted,
+    Autonomous,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct SessionId(String);
+
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionId {
+    pub fn new() -> Self {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        let short = &id[..8];
+        Self(format!("S-{}", short))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for SessionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl AsRef<str> for SessionId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for SessionId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionRecord {
+    pub id: SessionId,
+    pub agent: AgentType,
+    pub model: String,
+    pub repo_root: PathBuf,
+    pub state: SessionState,
+    pub role: SessionRole,
+    pub policy: Option<String>,
+    pub goal: Option<String>,
+    pub agent_session_id: Option<String>,
+    pub version: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub last_activity_at: DateTime<Utc>,
+}
+
+impl SessionRecord {
+    pub fn new(agent: AgentType, model: impl Into<String>, repo_root: PathBuf) -> Self {
+        let now = Utc::now();
+        Self {
+            id: SessionId::new(),
+            agent,
+            model: model.into(),
+            repo_root,
+            state: SessionState::Provisioning,
+            role: SessionRole::Worker,
+            policy: None,
+            goal: None,
+            agent_session_id: None,
+            version: 0,
+            created_at: now,
+            updated_at: now,
+            last_activity_at: now,
+        }
+    }
+
+    pub fn touch_state(&mut self, state: SessionState) {
+        let now = Utc::now();
+        self.state = state;
+        self.updated_at = now;
+        self.last_activity_at = now;
+        self.version = self.version.saturating_add(1);
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionStore {
+    root: PathBuf,
+}
+
+impl SessionStore {
+    pub fn new(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn ensure_dirs(&self) -> Result<(), CoreError> {
+        fs::create_dir_all(self.sessions_dir())?;
+        Ok(())
+    }
+
+    pub fn save(&self, record: &SessionRecord) -> Result<(), CoreError> {
+        self.ensure_dirs()?;
+        let path = self.session_path(&record.id);
+        let data = serde_json::to_vec_pretty(record)?;
+        fs::write(path, data)?;
+        Ok(())
+    }
+
+    pub fn save_checked(
+        &self,
+        record: &SessionRecord,
+        expected_version: u64,
+    ) -> Result<(), CoreError> {
+        self.ensure_dirs()?;
+        let path = self.session_path(&record.id);
+        if path.exists() {
+            let data = fs::read(&path)?;
+            let current: SessionRecord = serde_json::from_slice(&data)?;
+            if current.version != expected_version {
+                return Err(CoreError::VersionMismatch {
+                    expected: expected_version,
+                    actual: current.version,
+                });
+            }
+        }
+        let data = serde_json::to_vec_pretty(record)?;
+        fs::write(path, data)?;
+        Ok(())
+    }
+
+    pub fn load(&self, id: &SessionId) -> Result<SessionRecord, CoreError> {
+        let path = self.session_path(id);
+        if !path.exists() {
+            return Err(CoreError::SessionNotFound(id.to_string()));
+        }
+        let data = fs::read(path)?;
+        Ok(serde_json::from_slice(&data)?)
+    }
+
+    pub fn list(&self) -> Result<Vec<SessionRecord>, CoreError> {
+        let dir = self.sessions_dir();
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut records = Vec::new();
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                let data = fs::read(entry.path())?;
+                let record: SessionRecord = serde_json::from_slice(&data)?;
+                records.push(record);
+            }
+        }
+        Ok(records)
+    }
+
+    fn sessions_dir(&self) -> PathBuf {
+        self.root.join("sessions")
+    }
+
+    fn session_path(&self, id: &SessionId) -> PathBuf {
+        self.sessions_dir().join(format!("{}.json", id.as_str()))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionManager {
+    store: SessionStore,
+}
+
+impl SessionManager {
+    pub fn new(store: SessionStore) -> Self {
+        Self { store }
+    }
+
+    pub fn create_session(
+        &self,
+        agent: AgentType,
+        model: impl Into<String>,
+        repo_path: impl AsRef<Path>,
+    ) -> Result<SessionRecord, CoreError> {
+        self.create_session_with_role(agent, model, repo_path, SessionRole::Worker)
+    }
+
+    pub fn create_session_with_role(
+        &self,
+        agent: AgentType,
+        model: impl Into<String>,
+        repo_path: impl AsRef<Path>,
+        role: SessionRole,
+    ) -> Result<SessionRecord, CoreError> {
+        let canonical = fs::canonicalize(repo_path.as_ref())?;
+        let repo_root = RepoRoot::discover(&canonical)
+            .map(|root| root.path().to_path_buf())
+            .unwrap_or(canonical);
+        let mut record = SessionRecord::new(agent, model, repo_root);
+        record.role = role;
+        self.store.save(&record)?;
+        Ok(record)
+    }
+}
+
+pub fn sort_sessions(mut sessions: Vec<SessionRecord>) -> Vec<SessionRecord> {
+    sessions.sort_by(|a, b| {
+        let pa = state_priority(&a.state);
+        let pb = state_priority(&b.state);
+        pa.cmp(&pb)
+            .then_with(|| b.last_activity_at.cmp(&a.last_activity_at))
+    });
+    sessions
+}
+
+fn state_priority(state: &SessionState) -> u8 {
+    match state {
+        SessionState::WaitingInput => 0,
+        SessionState::Running => 1,
+        SessionState::Idle => 2,
+        SessionState::Errored => 3,
+        SessionState::Unreachable => 4,
+        SessionState::Terminated => 5,
+        SessionState::Provisioning => 6,
+        SessionState::Starting => 7,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+
+    #[test]
+    fn session_id_has_prefix() {
+        let id = SessionId::new();
+        assert!(id.as_str().starts_with("S-"));
+        assert_eq!(id.as_str().len(), 10);
+    }
+
+    #[test]
+    fn session_store_roundtrip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(tmp.path());
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
+        record.touch_state(SessionState::Running);
+        store.save(&record).unwrap();
+
+        let loaded = store.load(&record.id).unwrap();
+        assert_eq!(loaded.id, record.id);
+        assert_eq!(loaded.state, SessionState::Running);
+    }
+
+    #[test]
+    fn session_store_detects_version_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(tmp.path());
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
+        store.save(&record).unwrap();
+        let expected = record.version;
+        record.touch_state(SessionState::Running);
+        store.save_checked(&record, expected).unwrap();
+
+        let mut next = record.clone();
+        next.touch_state(SessionState::Idle);
+        let err = store.save_checked(&next, expected).unwrap_err();
+        assert!(matches!(err, CoreError::VersionMismatch { .. }));
+    }
+
+    #[test]
+    fn session_manager_uses_worktree_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("repo");
+        init_git_repo(&repo_path);
+
+        let worktree = tmp.path().join("worktree");
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&repo_path)
+            .arg("worktree")
+            .arg("add")
+            .arg(&worktree)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let nested = worktree.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        let store = SessionStore::new(tmp.path().join("store"));
+        let manager = SessionManager::new(store);
+        let record = manager
+            .create_session(AgentType::Claude, "sonnet", &nested)
+            .unwrap();
+
+        assert_eq!(record.repo_root, worktree.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn session_manager_falls_back_to_path_when_not_git() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo_path = tmp.path().join("plain");
+        std::fs::create_dir_all(&repo_path).unwrap();
+
+        let store = SessionStore::new(tmp.path().join("store"));
+        let manager = SessionManager::new(store);
+        let record = manager
+            .create_session(AgentType::Codex, "o3", &repo_path)
+            .unwrap();
+
+        assert_eq!(record.repo_root, repo_path.canonicalize().unwrap());
+    }
+
+    fn init_git_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        let status = Command::new("git").arg("init").arg(path).status().unwrap();
+        assert!(status.success());
+
+        let readme = path.join("README.md");
+        std::fs::write(&readme, "test").unwrap();
+
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(["add", "."])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args([
+                "-c",
+                "user.name=forgemux",
+                "-c",
+                "user.email=forgemux@example.com",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn sort_sessions_prioritizes_waiting_input() {
+        let now = Utc::now();
+        let mut waiting = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
+        waiting.state = SessionState::WaitingInput;
+        waiting.last_activity_at = now - chrono::Duration::seconds(300);
+
+        let mut running = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
+        running.state = SessionState::Running;
+        running.last_activity_at = now;
+
+        let sorted = sort_sessions(vec![running.clone(), waiting.clone()]);
+        assert_eq!(sorted[0].state, SessionState::WaitingInput);
+        assert_eq!(sorted[1].state, SessionState::Running);
+    }
+
+    #[test]
+    fn session_state_priority_places_unreachable_between_errored_and_terminated() {
+        assert!(state_priority(&SessionState::Errored) < state_priority(&SessionState::Terminated));
+        assert!(
+            state_priority(&SessionState::Errored) < state_priority(&SessionState::Unreachable)
+        );
+        assert!(
+            state_priority(&SessionState::Unreachable) < state_priority(&SessionState::Terminated)
+        );
+    }
+}

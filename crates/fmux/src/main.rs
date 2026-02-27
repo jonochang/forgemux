@@ -688,6 +688,7 @@ fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {
             SessionState::Running => "running",
             SessionState::Idle => "idle",
             SessionState::Errored => "errored",
+            SessionState::Unreachable => "unreachable",
             SessionState::Terminated => "terminated",
             SessionState::Provisioning => "provisioning",
             SessionState::Starting => "starting",

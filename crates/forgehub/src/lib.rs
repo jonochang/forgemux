@@ -2,10 +2,14 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use forgemux_core::{SessionRecord, SessionStore, sort_sessions};
 use serde::{Deserialize, Serialize};
+use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+mod db;
+use db::init_db;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubEdge {
@@ -44,17 +48,21 @@ pub struct HubService {
     round_robin: Arc<Mutex<usize>>,
     pairing_tokens: Arc<Mutex<HashMap<String, PairingToken>>>,
     issued_tokens: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+    #[allow(dead_code)]
+    db: SqlitePool,
 }
 
 impl HubService {
-    pub fn new(config: HubConfig) -> Self {
-        Self {
+    pub async fn new(config: HubConfig) -> anyhow::Result<Self> {
+        let db = init_db(&config.data_dir).await?;
+        Ok(Self {
             config,
             registry: Arc::new(Mutex::new(HashMap::new())),
             round_robin: Arc::new(Mutex::new(0)),
             pairing_tokens: Arc::new(Mutex::new(HashMap::new())),
             issued_tokens: Arc::new(Mutex::new(HashMap::new())),
-        }
+            db,
+        })
     }
 
     pub fn list_edges(&self) -> Vec<HubEdge> {
@@ -228,8 +236,8 @@ mod tests {
     use forgemux_core::{AgentType, SessionRecord, SessionState};
     use tempfile::tempdir;
 
-    #[test]
-    fn hub_service_aggregates_sessions() {
+    #[tokio::test]
+    async fn hub_service_aggregates_sessions() {
         let tmp = tempfile::tempdir().unwrap();
         let edge1 = tmp.path().join("edge1");
         let edge2 = tmp.path().join("edge2");
@@ -259,21 +267,25 @@ mod tests {
                 },
             ],
             tokens: Vec::new(),
-        });
+        })
+        .await
+        .unwrap();
 
         let sessions = service.list_sessions().unwrap();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].state, SessionState::WaitingInput);
     }
 
-    #[test]
-    fn hub_service_registers_and_heartbeats() {
+    #[tokio::test]
+    async fn hub_service_registers_and_heartbeats() {
         let tmp = tempfile::tempdir().unwrap();
         let service = HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: vec![],
             tokens: Vec::new(),
-        });
+        })
+        .await
+        .unwrap();
 
         let reg = service.register_edge("edge-a".to_string(), "127.0.0.1:9000".to_string());
         assert_eq!(reg.id, "edge-a");
@@ -283,14 +295,16 @@ mod tests {
         assert_eq!(service.list_registered_edges().len(), 1);
     }
 
-    #[test]
-    fn hub_service_picks_edges_round_robin() {
+    #[tokio::test]
+    async fn hub_service_picks_edges_round_robin() {
         let tmp = tempfile::tempdir().unwrap();
         let service = HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: vec![],
             tokens: Vec::new(),
-        });
+        })
+        .await
+        .unwrap();
 
         service.register_edge("edge-a".to_string(), "127.0.0.1:9000".to_string());
         service.register_edge("edge-b".to_string(), "127.0.0.1:9001".to_string());
@@ -314,14 +328,16 @@ mod tests {
         assert!(cfg.tokens.is_empty());
     }
 
-    #[test]
-    fn pairing_tokens_exchange_for_access_token() {
+    #[tokio::test]
+    async fn pairing_tokens_exchange_for_access_token() {
         let tmp = tempdir().unwrap();
         let service = HubService::new(HubConfig {
             data_dir: tmp.path().join("hub"),
             edges: vec![],
             tokens: Vec::new(),
-        });
+        })
+        .await
+        .unwrap();
 
         let pairing = service.start_pairing(60);
         let issued = service.exchange_pairing(&pairing.token, 300).unwrap();

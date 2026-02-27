@@ -63,12 +63,13 @@ fn main() -> anyhow::Result<()> {
             tokens: Vec::new(),
         }
     };
-    let service = HubService::new(config);
+    let rt = tokio::runtime::Runtime::new()?;
+    let service = Arc::new(rt.block_on(HubService::new(config))?);
 
     match cli.command {
         Command::Run => {
             let addr: SocketAddr = cli.bind.parse()?;
-            let shared = Arc::new(service);
+            let shared = service.clone();
             let app = Router::new()
                 .route("/health", get(health))
                 .route("/metrics", get(metrics))
@@ -91,7 +92,6 @@ fn main() -> anyhow::Result<()> {
                 .route("/index.html", get(dashboard_index))
                 .fallback_service(ServeDir::new("dashboard"))
                 .with_state(shared);
-            let rt = tokio::runtime::Runtime::new()?;
             rt.block_on(async move {
                 let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
                 axum::serve(listener, app).await.unwrap();
@@ -109,7 +109,6 @@ fn main() -> anyhow::Result<()> {
             }
         }
         Command::Export { kind } => {
-            let rt = tokio::runtime::Runtime::new()?;
             let output = match kind.as_str() {
                 "sessions" => {
                     let sessions = rt.block_on(async { fetch_sessions(&service).await });
@@ -874,11 +873,15 @@ mod tests {
     #[tokio::test]
     async fn register_and_list_edges() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = Arc::new(HubService::new(HubConfig {
-            data_dir: tmp.path().join("hub"),
-            edges: Vec::new(),
-            tokens: Vec::new(),
-        }));
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
         let app = Router::new()
             .route("/edges", get(list_edges))
             .route("/edges/register", post(register_edge))
@@ -939,11 +942,15 @@ mod tests {
         });
 
         let tmp = tempfile::tempdir().unwrap();
-        let service = Arc::new(HubService::new(HubConfig {
-            data_dir: tmp.path().join("hub"),
-            edges: Vec::new(),
-            tokens: Vec::new(),
-        }));
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
         service.register_edge("edge-01".to_string(), addr.to_string());
         let app = Router::new()
             .route("/foreman/report", get(foreman_report))
@@ -978,11 +985,15 @@ mod tests {
         });
 
         let tmp = tempfile::tempdir().unwrap();
-        let service = Arc::new(HubService::new(HubConfig {
-            data_dir: tmp.path().join("hub"),
-            edges: Vec::new(),
-            tokens: Vec::new(),
-        }));
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
         service.register_edge("edge-01".to_string(), addr.to_string());
         let app = Router::new()
             .route("/sessions/:id/input", post(session_input))
@@ -1020,11 +1031,15 @@ mod tests {
         });
 
         let tmp = tempfile::tempdir().unwrap();
-        let service = Arc::new(HubService::new(HubConfig {
-            data_dir: tmp.path().join("hub"),
-            edges: Vec::new(),
-            tokens: Vec::new(),
-        }));
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
         service.register_edge("edge-01".to_string(), addr.to_string());
         let app = Router::new()
             .route("/sessions/:id/usage", get(session_usage))
@@ -1066,11 +1081,15 @@ mod tests {
     #[tokio::test]
     async fn routes_basic_health() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = Arc::new(HubService::new(HubConfig {
-            data_dir: tmp.path().join("hub"),
-            edges: Vec::new(),
-            tokens: Vec::new(),
-        }));
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
         let app = Router::new()
             .route("/health", get(health))
             .route("/sessions", get(list_sessions))
@@ -1129,11 +1148,15 @@ mod tests {
     #[tokio::test]
     async fn routes_reject_incompatible_version() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = Arc::new(HubService::new(HubConfig {
-            data_dir: tmp.path().join("hub"),
-            edges: Vec::new(),
-            tokens: Vec::new(),
-        }));
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
         let app = Router::new()
             .route("/sessions", get(list_sessions))
             .with_state(service);
@@ -1154,11 +1177,15 @@ mod tests {
     #[tokio::test]
     async fn pairing_start_returns_token() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = Arc::new(HubService::new(HubConfig {
-            data_dir: tmp.path().join("hub"),
-            edges: Vec::new(),
-            tokens: Vec::new(),
-        }));
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
         let app = Router::new()
             .route("/pairing/start", post(pairing_start))
             .with_state(service);
@@ -1179,11 +1206,15 @@ mod tests {
     #[tokio::test]
     async fn routes_require_auth_when_configured() {
         let tmp = tempfile::tempdir().unwrap();
-        let service = Arc::new(HubService::new(HubConfig {
-            data_dir: tmp.path().join("hub"),
-            edges: Vec::new(),
-            tokens: vec!["secret".to_string()],
-        }));
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: vec!["secret".to_string()],
+            })
+            .await
+            .unwrap(),
+        );
         let app = Router::new()
             .route("/edges", get(list_edges))
             .with_state(service);

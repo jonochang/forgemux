@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.8 - 2026-02-27
+
+- Split forgemux-core into modules and add `Unreachable` session state.
+- Introduce workspace/org core types plus goal/session ID fields on SessionRecord.
+- Add forgehub SQLite migrations and DB bootstrap.
+
 ## 0.1.7 - 2026-02-27
 
 - Add hub pairing flow and dashboard token-based auth.
