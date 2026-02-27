@@ -620,6 +620,11 @@ impl<R: CommandRunner> SessionService<R> {
         }
         record.touch_state(SessionState::Starting);
         self.store.save(&record)?;
+        self.log_state_change(
+            &record.id,
+            SessionState::Provisioning,
+            SessionState::Starting,
+        );
 
         let agent_cfg = self
             .config
@@ -643,6 +648,7 @@ impl<R: CommandRunner> SessionService<R> {
         if !output.status.success() {
             record.touch_state(SessionState::Errored);
             self.store.save(&record)?;
+            self.log_state_change(&record.id, SessionState::Starting, SessionState::Errored);
             anyhow::bail!("tmux failed: {}", String::from_utf8_lossy(&output.stderr));
         }
 
@@ -650,6 +656,7 @@ impl<R: CommandRunner> SessionService<R> {
 
         record.touch_state(SessionState::Running);
         self.store.save(&record)?;
+        self.log_state_change(&record.id, SessionState::Starting, SessionState::Running);
         if let Some(spec) = worktree_info {
             self.store_worktree_meta(&record.id, &spec)?;
         }
@@ -677,6 +684,11 @@ impl<R: CommandRunner> SessionService<R> {
             .context("create foreman session")?;
         record.touch_state(SessionState::Starting);
         self.store.save(&record)?;
+        self.log_state_change(
+            &record.id,
+            SessionState::Provisioning,
+            SessionState::Starting,
+        );
 
         let agent_cfg = self
             .config
@@ -698,12 +710,14 @@ impl<R: CommandRunner> SessionService<R> {
         if !output.status.success() {
             record.touch_state(SessionState::Errored);
             self.store.save(&record)?;
+            self.log_state_change(&record.id, SessionState::Starting, SessionState::Errored);
             anyhow::bail!("tmux failed: {}", String::from_utf8_lossy(&output.stderr));
         }
 
         self.ensure_transcript_pipe(&record)?;
         record.touch_state(SessionState::Running);
         self.store.save(&record)?;
+        self.log_state_change(&record.id, SessionState::Starting, SessionState::Running);
         Ok(record)
     }
 
@@ -740,6 +754,7 @@ impl<R: CommandRunner> SessionService<R> {
             };
             let state = detector.detect(Utc::now(), &signal);
             if state != session.state {
+                self.log_state_change(&session.id, session.state.clone(), state.clone());
                 let allowed = self.load_notification_prefs(&session.id)?;
                 self.notifier.maybe_notify(
                     &self.config.notifications,
@@ -1208,6 +1223,34 @@ impl<R: CommandRunner> SessionService<R> {
         Ok(())
     }
 
+    fn log_state_change(
+        &self,
+        id: &forgemux_core::SessionId,
+        from: SessionState,
+        to: SessionState,
+    ) {
+        let path = self
+            .config
+            .data_dir
+            .join("events")
+            .join(format!("{}.jsonl", id.as_str()));
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let record = serde_json::json!({
+            "ts": Utc::now(),
+            "type": "state-change",
+            "session_id": id.as_str(),
+            "from": format!("{from:?}"),
+            "to": format!("{to:?}"),
+        });
+        if let Ok(line) = serde_json::to_string(&record)
+            && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
     fn load_notification_prefs(
         &self,
         id: &forgemux_core::SessionId,
@@ -1593,6 +1636,27 @@ mod tests {
             call.contains(&"new-session".to_string())
                 && call.contains(&record.id.as_str().to_string())
         }));
+    }
+
+    #[test]
+    fn start_session_writes_state_change_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        config.tmux_bin = "tmux".to_string();
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let record = service
+            .start_session(AgentType::Claude, "sonnet", tmp.path())
+            .unwrap();
+
+        let path = tmp
+            .path()
+            .join("events")
+            .join(format!("{}.jsonl", record.id.as_str()));
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("\"type\":\"state-change\""));
+        assert!(content.contains("\"to\":\"Running\""));
     }
 
     #[test]
