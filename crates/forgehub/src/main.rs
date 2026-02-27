@@ -1059,6 +1059,8 @@ mod tests {
         assert!(DASHBOARD_HTML.contains("sessions/ws"));
         assert!(DASHBOARD_HTML.contains("sessions/${id}/attach"));
         assert!(DASHBOARD_HTML.contains("pendingInputs"));
+        assert!(DASHBOARD_HTML.contains("detail-logs"));
+        assert!(DASHBOARD_HTML.contains("start-session"));
     }
 
     #[tokio::test]

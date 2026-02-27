@@ -56,6 +56,10 @@
         grid-template-columns: 1fr 2fr;
         gap: 20px;
       }
+      .stack {
+        display: grid;
+        gap: 20px;
+      }
       @media (max-width: 768px) {
         .grid {
           grid-template-columns: 1fr;
@@ -210,6 +214,64 @@
       .session-row.archived {
         opacity: 0.55;
       }
+      .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .detail-grid span {
+        font-weight: 600;
+      }
+      .detail-section {
+        margin-top: 16px;
+      }
+      .log-box {
+        background: #14171d;
+        color: #d9d9d9;
+        border-radius: 8px;
+        padding: 12px;
+        font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+        font-size: 12px;
+        max-height: 200px;
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+      .form-row {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      .form-row input {
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 13px;
+      }
+      .form-row label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .form-actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-top: 12px;
+      }
+      .form-actions button {
+        border: none;
+        border-radius: 999px;
+        background: var(--accent);
+        color: white;
+        padding: 8px 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .form-actions button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
     </style>
   </head>
   <body>
@@ -222,19 +284,70 @@
         <strong>Sessions</strong>
         <div class="muted" id="sessions">Loading sessions...</div>
       </div>
-      <div class="card">
-        <strong>Attach</strong>
-        <div class="muted" id="attach-help">Select a session to attach.</div>
-        <div class="terminal" id="terminal">Waiting for session...</div>
-        <div class="controls">
-          <textarea
-            id="input"
-            rows="1"
-            placeholder="Send input (Enter to send, Shift+Enter for newline)"
-          ></textarea>
-          <button id="send">Send</button>
+      <div class="stack">
+        <div class="card">
+          <strong>Attach</strong>
+          <div class="muted" id="attach-help">Select a session to attach.</div>
+          <div class="terminal" id="terminal">Waiting for session...</div>
+          <div class="controls">
+            <textarea
+              id="input"
+              rows="1"
+              placeholder="Send input (Enter to send, Shift+Enter for newline)"
+            ></textarea>
+            <button id="send">Send</button>
+          </div>
+          <div class="status" id="ws-status">WebSocket idle.</div>
         </div>
-        <div class="status" id="ws-status">WebSocket idle.</div>
+        <div class="card">
+          <strong>Session Details</strong>
+          <div class="muted small" id="detail-meta">Select a session to view details.</div>
+          <div class="detail-grid">
+            <div>State: <span id="detail-state">-</span></div>
+            <div>Agent: <span id="detail-agent">-</span></div>
+            <div>Model: <span id="detail-model">-</span></div>
+            <div>Repo: <span id="detail-repo">-</span></div>
+            <div>Last activity: <span id="detail-activity">-</span></div>
+          </div>
+          <div class="detail-section">
+            <strong>Recent Logs</strong>
+            <div class="log-box" id="detail-logs">No logs loaded.</div>
+          </div>
+          <div class="detail-section">
+            <strong>Usage</strong>
+            <div class="muted small" id="detail-usage">No usage data.</div>
+          </div>
+        </div>
+        <div class="card">
+          <strong>Start Session</strong>
+          <div class="muted small">Launch a new session on the hub.</div>
+          <div class="form-row">
+            <label for="start-agent">Agent</label>
+            <input id="start-agent" placeholder="claude" />
+          </div>
+          <div class="form-row">
+            <label for="start-model">Model</label>
+            <input id="start-model" placeholder="sonnet" />
+          </div>
+          <div class="form-row">
+            <label for="start-repo">Repo</label>
+            <input id="start-repo" placeholder="." />
+          </div>
+          <div class="form-row">
+            <label for="start-branch">Branch (required if worktree)</label>
+            <input id="start-branch" placeholder="feature/my-branch" />
+          </div>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" id="start-worktree" />
+              Create worktree
+            </label>
+          </div>
+          <div class="form-actions">
+            <button id="start-session">Start</button>
+            <div class="muted small" id="start-status">Idle.</div>
+          </div>
+        </div>
       </div>
     </main>
     <script>
@@ -244,8 +357,24 @@
       const attachHelp = document.getElementById("attach-help");
       const inputEl = document.getElementById("input");
       const sendBtn = document.getElementById("send");
+      const detailMetaEl = document.getElementById("detail-meta");
+      const detailStateEl = document.getElementById("detail-state");
+      const detailAgentEl = document.getElementById("detail-agent");
+      const detailModelEl = document.getElementById("detail-model");
+      const detailRepoEl = document.getElementById("detail-repo");
+      const detailActivityEl = document.getElementById("detail-activity");
+      const detailLogsEl = document.getElementById("detail-logs");
+      const detailUsageEl = document.getElementById("detail-usage");
+      const startAgentEl = document.getElementById("start-agent");
+      const startModelEl = document.getElementById("start-model");
+      const startRepoEl = document.getElementById("start-repo");
+      const startBranchEl = document.getElementById("start-branch");
+      const startWorktreeEl = document.getElementById("start-worktree");
+      const startBtn = document.getElementById("start-session");
+      const startStatusEl = document.getElementById("start-status");
       const authToken = new URLSearchParams(window.location.search).get("token");
       const authQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+      const authHeader = authToken ? { Authorization: `Bearer ${authToken}` } : {};
       const cryptoKeyBase64 = new URLSearchParams(window.location.search).get("key");
       const cryptoKeyPromise = cryptoKeyBase64 ? importKey(cryptoKeyBase64) : null;
       let attachSocket = null;
@@ -253,6 +382,7 @@
       let pendingInputs = [];
       let lastTerminalData = null;
       let lastSessionsJson = null;
+      let sessionsById = {};
 
       // --- ANSI color support ---
       const ANSI_COLORS = [
@@ -408,7 +538,7 @@
             ${escapeHtml(session.id)} &middot; ${escapeHtml(session.agent)} ${escapeHtml(session.model)} &middot; ${timeAgo(session.last_activity_at)}
           </div>
         `;
-        row.addEventListener("click", () => attachSession(session.id));
+        row.addEventListener("click", () => selectSession(session));
         return row;
       }
 
@@ -417,6 +547,10 @@
           sessionsEl.textContent = "No sessions found.";
           return;
         }
+        sessionsById = {};
+        sessions.forEach((s) => {
+          sessionsById[s.id] = s;
+        });
         const active = sessions.filter((s) => !isArchived(s.state));
         const archived = sessions.filter((s) => isArchived(s.state));
 
@@ -447,11 +581,22 @@
           sessionsEl.appendChild(header);
           sessionsEl.appendChild(body);
         }
+
+        if (currentSessionId && sessionsById[currentSessionId]) {
+          updateDetail(sessionsById[currentSessionId]);
+        }
       }
 
       // --- Attach ---
+      function selectSession(session) {
+        currentSessionId = session.id;
+        updateDetail(session);
+        loadLogs(session.id);
+        loadUsage(session.id);
+        attachSession(session.id);
+      }
+
       function attachSession(id) {
-        currentSessionId = id;
         lastTerminalData = null;
         if (attachSocket) {
           attachSocket.close();
@@ -496,6 +641,50 @@
             setTimeout(() => attachSession(currentSessionId), 1500);
           }
         });
+      }
+
+      function updateDetail(session) {
+        if (!session) return;
+        detailMetaEl.textContent = `Session ${session.id}`;
+        detailStateEl.textContent = session.state || "-";
+        detailAgentEl.textContent = session.agent || "-";
+        detailModelEl.textContent = session.model || "-";
+        detailRepoEl.textContent = session.repo_root || "-";
+        detailActivityEl.textContent = session.last_activity_at
+          ? new Date(session.last_activity_at).toLocaleString()
+          : "-";
+      }
+
+      async function loadLogs(id) {
+        detailLogsEl.textContent = "Loading logs...";
+        try {
+          const resp = await fetch(`/sessions/${encodeURIComponent(id)}/logs`, {
+            headers: authHeader,
+          });
+          if (!resp.ok) throw new Error("log fetch failed");
+          const data = await resp.json();
+          detailLogsEl.textContent = data.content || "No logs available.";
+        } catch (err) {
+          detailLogsEl.textContent = "Failed to load logs.";
+        }
+      }
+
+      async function loadUsage(id) {
+        detailUsageEl.textContent = "Loading usage...";
+        try {
+          const resp = await fetch(`/sessions/${encodeURIComponent(id)}/usage`, {
+            headers: authHeader,
+          });
+          if (!resp.ok) throw new Error("usage fetch failed");
+          const data = await resp.json();
+          const cost =
+            typeof data.estimated_cost_usd === "number"
+              ? `$${data.estimated_cost_usd.toFixed(4)}`
+              : "-";
+          detailUsageEl.textContent = `Prompt ${data.prompt_tokens} · Completion ${data.completion_tokens} · Total ${data.total_tokens} · ${cost}`;
+        } catch (err) {
+          detailUsageEl.textContent = "Failed to load usage.";
+        }
       }
 
       // --- Input handling ---
@@ -567,6 +756,50 @@
       }
 
       connectSessionsSocket();
+
+      async function startSession() {
+        startBtn.disabled = true;
+        startStatusEl.textContent = "Starting...";
+        const payload = {
+          agent: startAgentEl.value || "claude",
+          model: startModelEl.value || "sonnet",
+          repo: startRepoEl.value || ".",
+        };
+        if (startWorktreeEl.checked) {
+          if (!startBranchEl.value) {
+            startStatusEl.textContent = "Branch required for worktree.";
+            startBtn.disabled = false;
+            return;
+          }
+          payload.worktree = true;
+          payload.branch = startBranchEl.value || "";
+        }
+        try {
+          const resp = await fetch("/sessions", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...authHeader,
+            },
+            body: JSON.stringify(payload),
+          });
+          const data = await resp.json();
+          if (!resp.ok) {
+            throw new Error(data.error || "start failed");
+          }
+          startStatusEl.textContent = `Started ${data.session_id || "session"}`;
+          if (data.session_id) {
+            startRepoEl.value = payload.repo;
+            startBranchEl.value = payload.branch || "";
+          }
+        } catch (err) {
+          startStatusEl.textContent = err.message;
+        } finally {
+          startBtn.disabled = false;
+        }
+      }
+
+      startBtn.addEventListener("click", startSession);
 
       function base64ToBytes(base64) {
         const bin = atob(base64);
