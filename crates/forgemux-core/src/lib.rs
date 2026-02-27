@@ -13,6 +13,8 @@ pub enum CoreError {
     Serde(#[from] serde_json::Error),
     #[error("session not found: {0}")]
     SessionNotFound(String),
+    #[error("session version mismatch: expected {expected}, found {actual}")]
+    VersionMismatch { expected: u64, actual: u64 },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -96,6 +98,7 @@ pub struct SessionRecord {
     pub state: SessionState,
     pub role: SessionRole,
     pub policy: Option<String>,
+    pub version: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_activity_at: DateTime<Utc>,
@@ -112,6 +115,7 @@ impl SessionRecord {
             state: SessionState::Provisioning,
             role: SessionRole::Worker,
             policy: None,
+            version: 0,
             created_at: now,
             updated_at: now,
             last_activity_at: now,
@@ -123,6 +127,7 @@ impl SessionRecord {
         self.state = state;
         self.updated_at = now;
         self.last_activity_at = now;
+        self.version = self.version.saturating_add(1);
     }
 }
 
@@ -144,6 +149,28 @@ impl SessionStore {
     pub fn save(&self, record: &SessionRecord) -> Result<(), CoreError> {
         self.ensure_dirs()?;
         let path = self.session_path(&record.id);
+        let data = serde_json::to_vec_pretty(record)?;
+        fs::write(path, data)?;
+        Ok(())
+    }
+
+    pub fn save_checked(
+        &self,
+        record: &SessionRecord,
+        expected_version: u64,
+    ) -> Result<(), CoreError> {
+        self.ensure_dirs()?;
+        let path = self.session_path(&record.id);
+        if path.exists() {
+            let data = fs::read(&path)?;
+            let current: SessionRecord = serde_json::from_slice(&data)?;
+            if current.version != expected_version {
+                return Err(CoreError::VersionMismatch {
+                    expected: expected_version,
+                    actual: current.version,
+                });
+            }
+        }
         let data = serde_json::to_vec_pretty(record)?;
         fs::write(path, data)?;
         Ok(())
@@ -351,6 +378,22 @@ mod tests {
         let loaded = store.load(&record.id).unwrap();
         assert_eq!(loaded.id, record.id);
         assert_eq!(loaded.state, SessionState::Running);
+    }
+
+    #[test]
+    fn session_store_detects_version_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(tmp.path());
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
+        store.save(&record).unwrap();
+        let expected = record.version;
+        record.touch_state(SessionState::Running);
+        store.save_checked(&record, expected).unwrap();
+
+        let mut next = record.clone();
+        next.touch_state(SessionState::Idle);
+        let err = store.save_checked(&next, expected).unwrap_err();
+        assert!(matches!(err, CoreError::VersionMismatch { .. }));
     }
 
     #[test]

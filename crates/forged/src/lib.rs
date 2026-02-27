@@ -618,8 +618,9 @@ impl<R: CommandRunner> SessionService<R> {
             }
             record.policy = Some(policy_name);
         }
+        let expected = record.version;
         record.touch_state(SessionState::Starting);
-        self.store.save(&record)?;
+        self.store.save_checked(&record, expected)?;
         self.log_state_change(
             &record.id,
             SessionState::Provisioning,
@@ -646,16 +647,18 @@ impl<R: CommandRunner> SessionService<R> {
 
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
+            let expected = record.version;
             record.touch_state(SessionState::Errored);
-            self.store.save(&record)?;
+            self.store.save_checked(&record, expected)?;
             self.log_state_change(&record.id, SessionState::Starting, SessionState::Errored);
             anyhow::bail!("tmux failed: {}", String::from_utf8_lossy(&output.stderr));
         }
 
         self.ensure_transcript_pipe(&record)?;
 
+        let expected = record.version;
         record.touch_state(SessionState::Running);
-        self.store.save(&record)?;
+        self.store.save_checked(&record, expected)?;
         self.log_state_change(&record.id, SessionState::Starting, SessionState::Running);
         if let Some(spec) = worktree_info {
             self.store_worktree_meta(&record.id, &spec)?;
@@ -682,8 +685,9 @@ impl<R: CommandRunner> SessionService<R> {
             .manager
             .create_session_with_role(agent.clone(), model, repo_path, role)
             .context("create foreman session")?;
+        let expected = record.version;
         record.touch_state(SessionState::Starting);
-        self.store.save(&record)?;
+        self.store.save_checked(&record, expected)?;
         self.log_state_change(
             &record.id,
             SessionState::Provisioning,
@@ -708,15 +712,17 @@ impl<R: CommandRunner> SessionService<R> {
 
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
+            let expected = record.version;
             record.touch_state(SessionState::Errored);
-            self.store.save(&record)?;
+            self.store.save_checked(&record, expected)?;
             self.log_state_change(&record.id, SessionState::Starting, SessionState::Errored);
             anyhow::bail!("tmux failed: {}", String::from_utf8_lossy(&output.stderr));
         }
 
         self.ensure_transcript_pipe(&record)?;
+        let expected = record.version;
         record.touch_state(SessionState::Running);
-        self.store.save(&record)?;
+        self.store.save_checked(&record, expected)?;
         self.log_state_change(&record.id, SessionState::Starting, SessionState::Running);
         Ok(record)
     }
@@ -764,8 +770,9 @@ impl<R: CommandRunner> SessionService<R> {
                     &state,
                     allowed.as_deref(),
                 );
+                let expected = session.version;
                 session.touch_state(state);
-                self.store.save(&session)?;
+                self.store.save_checked(&session, expected)?;
             }
             updated.push(session);
         }
@@ -788,8 +795,9 @@ impl<R: CommandRunner> SessionService<R> {
         }
         let mut record = self.store.load(&id)?;
         let from_state = record.state.clone();
+        let expected = record.version;
         record.touch_state(SessionState::Terminated);
-        self.store.save(&record)?;
+        self.store.save_checked(&record, expected)?;
         self.log_state_change(&record.id, from_state, SessionState::Terminated);
         Ok(())
     }
