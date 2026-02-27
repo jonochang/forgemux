@@ -3,7 +3,7 @@ use axum::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
     },
-    http::HeaderMap,
+    http::{HeaderMap, HeaderValue},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -17,6 +17,8 @@ use std::sync::Arc;
 use tower_http::services::ServeDir;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use std::collections::VecDeque;
+
+const DASHBOARD_HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dashboard/index.html"));
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -78,6 +80,8 @@ fn main() -> anyhow::Result<()> {
                 .route("/edges/heartbeat", post(heartbeat))
                 .route("/ws", get(ws_handler))
                 .route("/sessions/:id/attach", get(ws_attach))
+                .route("/", get(dashboard_index))
+                .route("/index.html", get(dashboard_index))
                 .fallback_service(ServeDir::new("dashboard"))
                 .with_state(shared);
             let rt = tokio::runtime::Runtime::new()?;
@@ -117,6 +121,15 @@ fn main() -> anyhow::Result<()> {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "healthy" }))
+}
+
+async fn dashboard_index() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    (axum::http::StatusCode::OK, headers, DASHBOARD_HTML)
 }
 
 async fn list_sessions(
@@ -816,11 +829,9 @@ mod tests {
 
     #[test]
     fn dashboard_includes_attach_and_queue() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let html = std::fs::read_to_string(root.join("../..").join("dashboard/index.html")).unwrap();
-        assert!(html.contains("sessions/ws"));
-        assert!(html.contains("sessions/${id}/attach"));
-        assert!(html.contains("pendingInputs"));
+        assert!(DASHBOARD_HTML.contains("sessions/ws"));
+        assert!(DASHBOARD_HTML.contains("sessions/${id}/attach"));
+        assert!(DASHBOARD_HTML.contains("pendingInputs"));
     }
 
     #[tokio::test]
