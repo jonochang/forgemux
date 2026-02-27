@@ -23,4 +23,22 @@ export const api = {
     const qs = new URLSearchParams({ workspace_id: workspaceId });
     return fetchJSON(`/decisions?${qs.toString()}`);
   },
+  approveDecision(id, body) {
+    return fetchJSON(`/decisions/${id}/approve`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  denyDecision(id, body) {
+    return fetchJSON(`/decisions/${id}/deny`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
+  commentDecision(id, body) {
+    return fetchJSON(`/decisions/${id}/comment`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    });
+  },
 };

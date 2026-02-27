@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.13 - 2026-02-27
+
+- Add decision queue UI with repo filters and context panels.
+- Wire decision queue to hub REST/WS streams and resolve actions.
+
 ## 0.1.12 - 2026-02-27
 
 - Add Preact+HTM dashboard shell with fleet view.
