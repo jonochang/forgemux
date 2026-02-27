@@ -133,7 +133,7 @@ fn main() -> anyhow::Result<()> {
             println!(r#"{{"status":"healthy"}}"#);
         }
         Command::Version => {
-            println!("forged 0.1.0");
+            println!("forged {}", env!("CARGO_PKG_VERSION"));
         }
     }
 

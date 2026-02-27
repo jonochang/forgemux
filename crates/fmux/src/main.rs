@@ -648,7 +648,7 @@ fn main() {
             }
         }
         Command::Version => {
-            println!("fmux 0.1.0");
+            println!("fmux {}", env!("CARGO_PKG_VERSION"));
         }
     }
 }

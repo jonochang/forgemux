@@ -117,7 +117,7 @@ fn main() -> anyhow::Result<()> {
             };
             println!("{output}");
         }
-        Command::Version => println!("forgehub 0.1.0"),
+        Command::Version => println!("forgehub {}", env!("CARGO_PKG_VERSION")),
     }
     Ok(())
 }
