@@ -62,6 +62,9 @@ async fn metrics<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
@@ -81,12 +84,19 @@ async fn metrics<R: CommandRunner + 'static>(
 async fn list_sessions<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
     headers: HeaderMap,
-) -> Json<Vec<forgemux_core::SessionRecord>> {
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
-        return Json(Vec::new());
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(Vec::<forgemux_core::SessionRecord>::new()),
+        )
+            .into_response();
     }
     let sessions = service.refresh_states().unwrap_or_default();
-    Json(sessions)
+    (StatusCode::OK, Json(sessions)).into_response()
 }
 
 async fn start_session<R: CommandRunner + 'static>(
@@ -94,6 +104,14 @@ async fn start_session<R: CommandRunner + 'static>(
     headers: HeaderMap,
     Json(req): Json<StartRequest>,
 ) -> Result<Json<StartResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
     if !authorized(&service, &headers, None) {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -181,6 +199,14 @@ async fn stop_session<R: CommandRunner + 'static>(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
     if !authorized(&service, &headers, None) {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -205,6 +231,14 @@ async fn session_logs<R: CommandRunner + 'static>(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
     if !authorized(&service, &headers, None) {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -235,6 +269,14 @@ async fn session_input<R: CommandRunner + 'static>(
     Path(id): Path<String>,
     Json(req): Json<InputRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
     if !authorized(&service, &headers, None) {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -260,6 +302,14 @@ async fn session_usage<R: CommandRunner + 'static>(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Json<crate::UsageRecord>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
     if !authorized(&service, &headers, None) {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -283,6 +333,14 @@ async fn foreman_report<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
     headers: HeaderMap,
 ) -> Result<Json<crate::ForemanReport>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
     if !authorized(&service, &headers, None) {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -304,10 +362,14 @@ async fn foreman_report<R: CommandRunner + 'static>(
 
 async fn ws_attach<R: CommandRunner + 'static>(
     State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
     Path(id): Path<String>,
     Query(query): Query<AuthQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &HeaderMap::new(), query.token.as_deref()) {
         return (StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
@@ -337,6 +399,43 @@ fn authorized<R: CommandRunner>(
         return service.config().api_tokens.iter().any(|t| t == token);
     }
     false
+}
+
+fn check_version(headers: &HeaderMap) -> Option<axum::response::Response> {
+    let version = headers
+        .get("x-forgemux-version")
+        .and_then(|value| value.to_str().ok())?;
+    if version_compatible(version) {
+        None
+    } else {
+        Some(
+            (
+                StatusCode::UPGRADE_REQUIRED,
+                format!(
+                    "forged {} requires fmux >= {}.x",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("CARGO_PKG_VERSION").split('.').next().unwrap_or("0")
+                ),
+            )
+                .into_response(),
+        )
+    }
+}
+
+fn version_compatible(client: &str) -> bool {
+    let Some(client_major) = client
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+    else {
+        return true;
+    };
+    let server_major = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+        .unwrap_or(client_major);
+    client_major == server_major
 }
 
 async fn handle_ws<R: CommandRunner + 'static>(
@@ -620,6 +719,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn routes_reject_incompatible_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let service = Arc::new(SessionService::new(config, FakeRunner::default()));
+        let app = build_router(service);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions")
+                    .header("x-forgemux-version", "2.0.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
     }
 
     #[tokio::test]

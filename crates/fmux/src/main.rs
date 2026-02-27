@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
+const FMUX_VERSION_HEADER: &str = "x-forgemux-version";
+
 #[derive(Debug, Parser)]
 #[command(name = "fmux")]
 #[command(about = "Forgemux CLI", long_about = None)]
@@ -169,10 +171,7 @@ fn main() {
 
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions/start", edge_addr.trim_end_matches('/'));
-            let mut req = client.post(url).json(&request);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.post(url).json(&request), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -224,10 +223,7 @@ fn main() {
                 edge_addr.trim_end_matches('/'),
                 session_id
             );
-            let mut req = client.post(url);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.post(url), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {}
@@ -253,10 +249,7 @@ fn main() {
                 edge_addr.trim_end_matches('/'),
                 session_id
             );
-            let mut req = client.post(url);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.post(url), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {}
@@ -278,10 +271,7 @@ fn main() {
         Command::Ls => {
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
-            let mut req = client.get(url);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.get(url), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -306,10 +296,7 @@ fn main() {
         Command::Status { session_id } => {
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
-            let mut req = client.get(url);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.get(url), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -357,10 +344,7 @@ fn main() {
                     edge_addr.trim_end_matches('/'),
                     session_id
                 );
-                let mut req = client.get(url);
-                if let Some(token) = token.as_deref() {
-                    req = req.bearer_auth(token);
-                }
+                let req = apply_headers(client.get(url), token.as_deref());
                 let response = req.send();
                 match response {
                     Ok(resp) if resp.status().is_success() => {
@@ -392,10 +376,7 @@ fn main() {
                         edge_addr.trim_end_matches('/'),
                         session_id
                     );
-                    let mut req = client.get(url);
-                    if let Some(token) = token.as_deref() {
-                        req = req.bearer_auth(token);
-                    }
+                    let req = apply_headers(client.get(url), token.as_deref());
                     let response = req.send();
                     match response {
                         Ok(resp) if resp.status().is_success() => {
@@ -436,10 +417,7 @@ fn main() {
         Command::Watch { interval } => loop {
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
-            let mut req = client.get(url);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.get(url), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -469,10 +447,7 @@ fn main() {
             };
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/edges", hub_url.trim_end_matches('/'));
-            let mut req = client.get(url);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.get(url), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -554,10 +529,7 @@ fn main() {
         Command::ForemanReport => {
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/foreman/report", edge_addr.trim_end_matches('/'));
-            let mut req = client.get(url);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.get(url), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -581,12 +553,12 @@ fn main() {
                 edge_addr.trim_end_matches('/'),
                 session_id
             );
-            let mut req = client
-                .post(url)
-                .json(&serde_json::json!({ "input": input }));
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(
+                client
+                    .post(url)
+                    .json(&serde_json::json!({ "input": input })),
+                token.as_deref(),
+            );
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {}
@@ -607,10 +579,7 @@ fn main() {
                 edge_addr.trim_end_matches('/'),
                 session_id
             );
-            let mut req = client.get(url);
-            if let Some(token) = token.as_deref() {
-                req = req.bearer_auth(token);
-            }
+            let req = apply_headers(client.get(url), token.as_deref());
             let response = req.send();
             match response {
                 Ok(resp) if resp.status().is_success() => {
@@ -726,6 +695,17 @@ fn resolve_token(token: Option<&str>, config: &CliConfig) -> Option<String> {
     config.token.clone()
 }
 
+fn apply_headers(
+    mut req: reqwest::blocking::RequestBuilder,
+    token: Option<&str>,
+) -> reqwest::blocking::RequestBuilder {
+    req = req.header(FMUX_VERSION_HEADER, env!("CARGO_PKG_VERSION"));
+    if let Some(token) = token {
+        req = req.bearer_auth(token);
+    }
+    req
+}
+
 fn expand_tilde(path: &str) -> PathBuf {
     if let Some(stripped) = path.strip_prefix("~/")
         && let Ok(home) = std::env::var("HOME")
@@ -800,12 +780,7 @@ fn doctor_report(
 fn check_health(url: &str, token: Option<&str>) -> bool {
     let client = reqwest::blocking::Client::new();
     let url = format!("{}/health", url.trim_end_matches('/'));
-    let req = match token {
-        Some(token) => client
-            .get(url)
-            .header("Authorization", format!("Bearer {}", token)),
-        None => client.get(url),
-    };
+    let req = apply_headers(client.get(url), token);
     req.send()
         .map(|resp| resp.status().is_success())
         .unwrap_or(false)

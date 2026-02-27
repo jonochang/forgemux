@@ -22,6 +22,7 @@ const DASHBOARD_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../dashboard/index.html"
 ));
+const FORGEHUB_VERSION_HEADER: &str = "x-forgemux-version";
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -139,6 +140,9 @@ async fn list_sessions(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -154,6 +158,9 @@ async fn list_sessions(
 }
 
 async fn metrics(State(service): State<Arc<HubService>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
@@ -172,6 +179,9 @@ async fn ws_sessions(
     Query(query): Query<AuthQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, query.token.as_deref()) {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
@@ -216,6 +226,9 @@ async fn list_edges(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -241,6 +254,13 @@ async fn register_edge(
     headers: HeaderMap,
     Json(req): Json<RegisterEdgeRequest>,
 ) -> Json<EdgeRegistration> {
+    if check_version(&headers).is_some() {
+        return Json(EdgeRegistration {
+            id: "version-mismatch".to_string(),
+            addr: "".to_string(),
+            last_seen: chrono::Utc::now(),
+        });
+    }
     if !authorized(&service, &headers, None) {
         return Json(EdgeRegistration {
             id: "unauthorized".to_string(),
@@ -261,6 +281,9 @@ async fn heartbeat(
     headers: HeaderMap,
     Json(req): Json<HeartbeatRequest>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -283,6 +306,9 @@ async fn start_session(
     headers: HeaderMap,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -320,6 +346,9 @@ async fn stop_session(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -352,6 +381,9 @@ async fn session_logs(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -385,6 +417,9 @@ async fn session_input(
     axum::extract::Path(id): axum::extract::Path<String>,
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -417,6 +452,9 @@ async fn session_usage(
     headers: HeaderMap,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -448,6 +486,9 @@ async fn foreman_report(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, None) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
@@ -514,6 +555,9 @@ async fn ws_attach(
     Query(query): Query<AttachQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
     if !authorized(&service, &headers, query.token.as_deref()) {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
@@ -542,6 +586,43 @@ fn authorized(service: &HubService, headers: &HeaderMap, token: Option<&str>) ->
         return service.is_token_valid(token);
     }
     false
+}
+
+fn check_version(headers: &HeaderMap) -> Option<axum::response::Response> {
+    let version = headers
+        .get(FORGEHUB_VERSION_HEADER)
+        .and_then(|value| value.to_str().ok())?;
+    if version_compatible(version) {
+        None
+    } else {
+        Some(
+            (
+                axum::http::StatusCode::UPGRADE_REQUIRED,
+                format!(
+                    "forgehub {} requires fmux >= {}.x",
+                    env!("CARGO_PKG_VERSION"),
+                    env!("CARGO_PKG_VERSION").split('.').next().unwrap_or("0")
+                ),
+            )
+                .into_response(),
+        )
+    }
+}
+
+fn version_compatible(client: &str) -> bool {
+    let Some(client_major) = client
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+    else {
+        return true;
+    };
+    let server_major = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .next()
+        .and_then(|part| part.parse::<u64>().ok())
+        .unwrap_or(client_major);
+    client_major == server_major
 }
 
 async fn relay_ws(ws_url: String, id: String, mut client: WebSocket) {
@@ -924,6 +1005,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn routes_reject_incompatible_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: Vec::new(),
+            tokens: Vec::new(),
+        }));
+        let app = Router::new()
+            .route("/sessions", get(list_sessions))
+            .with_state(service);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions")
+                    .header("x-forgemux-version", "2.0.0")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
     }
 
     #[tokio::test]
