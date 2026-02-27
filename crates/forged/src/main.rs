@@ -67,6 +67,8 @@ fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Run => {
             let addr: SocketAddr = cli.bind.parse()?;
+            let _pid_lock = service.acquire_pid_lock()?;
+            let _ = service.cleanup_orphan_sessions();
             if let Some((hub_url, node_id, advertise_addr)) = hub_info {
                 thread::spawn(move || {
                     let client = reqwest::blocking::Client::new();

@@ -5,7 +5,7 @@ use forgemux_core::{
     SessionStore, StateDetector, StateSignal, sort_sessions,
 };
 use regex::Regex;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
@@ -39,6 +39,7 @@ pub struct FakeRunner {
     calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     pub should_fail: bool,
     overrides: std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, i32)>>>,
+    stdout_overrides: std::sync::Arc<std::sync::Mutex<Vec<(Vec<String>, Vec<u8>)>>>,
 }
 
 #[cfg(test)]
@@ -50,6 +51,14 @@ impl FakeRunner {
     pub fn set_status_for(&self, pattern: &[&str], status_code: i32) {
         let mut overrides = self.overrides.lock().unwrap();
         overrides.push((pattern.iter().map(|s| s.to_string()).collect(), status_code));
+    }
+
+    pub fn set_stdout_for(&self, pattern: &[&str], stdout: &[u8]) {
+        let mut overrides = self.stdout_overrides.lock().unwrap();
+        overrides.push((
+            pattern.iter().map(|s| s.to_string()).collect(),
+            stdout.to_vec(),
+        ));
     }
 }
 
@@ -77,9 +86,23 @@ impl CommandRunner for FakeRunner {
             code
         };
         let status = std::process::ExitStatus::from_raw(status_code);
+        let stdout = {
+            let overrides = self.stdout_overrides.lock().unwrap();
+            let mut data = Vec::new();
+            for (pattern, payload) in overrides.iter() {
+                if pattern
+                    .iter()
+                    .all(|token| args.contains(token) || program == token)
+                {
+                    data = payload.clone();
+                    break;
+                }
+            }
+            data
+        };
         Ok(Output {
             status,
-            stdout: Vec::new(),
+            stdout,
             stderr: Vec::new(),
         })
     }
@@ -164,6 +187,17 @@ struct LogCursor {
     path: Option<PathBuf>,
     offset: u64,
     waiting_since: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug)]
+pub struct PidLock {
+    path: PathBuf,
+}
+
+impl Drop for PidLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -461,6 +495,64 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn stream_manager(&self) -> stream::StreamManager {
         self.stream_manager.clone()
+    }
+
+    pub fn acquire_pid_lock(&self) -> anyhow::Result<PidLock> {
+        let path = self.config.data_dir.join("forged.pid");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        if path.exists() {
+            let contents = fs::read_to_string(&path).unwrap_or_default();
+            if let Ok(pid) = contents.trim().parse::<u32>()
+                && pid_is_alive(pid)
+            {
+                anyhow::bail!("forged already running (pid {})", pid);
+            }
+        }
+        fs::write(&path, std::process::id().to_string())?;
+        Ok(PidLock { path })
+    }
+
+    pub fn cleanup_orphan_sessions(&self) -> anyhow::Result<usize> {
+        let sessions_dir = self.config.data_dir.join("sessions");
+        if !sessions_dir.exists() {
+            return Ok(0);
+        }
+        let args = vec![
+            "list-sessions".to_string(),
+            "-F".to_string(),
+            "#{session_name}".to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &args)?;
+        if !output.status.success() {
+            return Ok(0);
+        }
+        let known = self
+            .store
+            .list()?
+            .into_iter()
+            .map(|s| s.id)
+            .collect::<HashSet<_>>();
+        let mut reaped = 0;
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let name = line.trim();
+            if !name.starts_with("S-") {
+                continue;
+            }
+            let id = forgemux_core::SessionId::from(name);
+            if known.contains(&id) {
+                continue;
+            }
+            let args = vec![
+                "kill-session".to_string(),
+                "-t".to_string(),
+                name.to_string(),
+            ];
+            let _ = self.runner.run(&self.config.tmux_bin, &args)?;
+            reaped += 1;
+        }
+        Ok(reaped)
     }
 
     pub fn start_session(
@@ -1286,6 +1378,10 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+fn pid_is_alive(pid: u32) -> bool {
+    PathBuf::from("/proc").join(pid.to_string()).exists()
+}
+
 fn is_jsonl(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -1638,6 +1734,61 @@ mod tests {
         service.drain(false).unwrap();
         let result = service.start_session(AgentType::Claude, "sonnet", tmp.path());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn pid_lock_prevents_second_start() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let _lock = service.acquire_pid_lock().unwrap();
+        let err = service.acquire_pid_lock().unwrap_err();
+        assert!(err.to_string().contains("forged already running"));
+    }
+
+    #[test]
+    fn pid_lock_cleans_up_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+        let path = service.config.data_dir.join("forged.pid");
+
+        {
+            let _lock = service.acquire_pid_lock().unwrap();
+            assert!(path.exists());
+        }
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn cleanup_orphan_sessions_kills_unknown_tmux_sessions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        runner.set_stdout_for(
+            &["list-sessions", "-F", "#{session_name}"],
+            b"S-keep\nS-orphan\nnot-forgemux\n",
+        );
+        let service = SessionService::new(config, runner.clone());
+
+        let mut record = service
+            .manager
+            .create_session(AgentType::Claude, "sonnet", tmp.path())
+            .unwrap();
+        record.id = forgemux_core::SessionId::from("S-keep");
+        service.store.save(&record).unwrap();
+
+        let reaped = service.cleanup_orphan_sessions().unwrap();
+        assert_eq!(reaped, 1);
+
+        let calls = runner.calls();
+        assert!(calls.iter().any(|call| {
+            call.contains(&"kill-session".to_string()) && call.contains(&"S-orphan".to_string())
+        }));
     }
 
     #[test]
