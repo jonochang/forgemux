@@ -7,7 +7,8 @@ use forgemux_core::{
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Read, Seek};
+use std::fs::OpenOptions;
+use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::SystemTime;
@@ -738,6 +739,7 @@ impl<R: CommandRunner> SessionService<R> {
                 self.notifier.maybe_notify(
                     &self.config.notifications,
                     &self.runner,
+                    &self.config.data_dir,
                     &session,
                     &state,
                     allowed.as_deref(),
@@ -1261,6 +1263,7 @@ impl NotificationEngine {
         &self,
         config: &NotificationConfig,
         runner: &R,
+        data_dir: &Path,
         session: &SessionRecord,
         new_state: &SessionState,
         allowed: Option<&[NotificationKind]>,
@@ -1291,7 +1294,10 @@ impl NotificationEngine {
             {
                 continue;
             }
-            let _ = send_hook(runner, hook, session, event);
+            let result = send_hook_with_retry(runner, data_dir, hook, session, event);
+            if result.is_ok() {
+                break;
+            }
         }
     }
 
@@ -1323,31 +1329,106 @@ impl NotificationHook {
         }
     }
 }
-fn send_hook<R: CommandRunner>(
+fn send_hook_with_retry<R: CommandRunner>(
     runner: &R,
+    data_dir: &Path,
     hook: &NotificationHook,
     session: &SessionRecord,
     event: NotificationEvent,
 ) -> anyhow::Result<()> {
-    let message = render_template("Session {{session_id}} is {{state}}", session, event);
     match hook {
         NotificationHook::Desktop => {
+            let message = render_template("Session {{session_id}} is {{state}}", session, event);
             let args = vec!["-a".to_string(), "forgemux".to_string(), message];
-            let _ = runner.run("notify-send", &args)?;
+            let output = runner.run("notify-send", &args)?;
+            let result = output.status.success();
+            log_delivery(
+                data_dir,
+                session,
+                event,
+                hook.kind(),
+                1,
+                result,
+                if result {
+                    None
+                } else {
+                    Some("notify-send failed".to_string())
+                },
+            );
+            if !result {
+                anyhow::bail!("notify-send failed");
+            }
         }
         NotificationHook::Command { program, args } => {
             let rendered = args
                 .iter()
                 .map(|arg| render_template(arg, session, event))
                 .collect::<Vec<_>>();
-            let _ = runner.run(program, &rendered)?;
+            let output = runner.run(program, &rendered)?;
+            let result = output.status.success();
+            log_delivery(
+                data_dir,
+                session,
+                event,
+                hook.kind(),
+                1,
+                result,
+                if result {
+                    None
+                } else {
+                    Some("command failed".to_string())
+                },
+            );
+            if !result {
+                anyhow::bail!("command failed");
+            }
         }
         NotificationHook::Webhook { url, template } => {
             let body = render_template(template, session, event);
             let client = reqwest::blocking::Client::new();
-            let resp = client.post(url).body(body).send()?;
-            if !resp.status().is_success() {
-                anyhow::bail!("webhook returned {}", resp.status());
+            let backoff = [1u64, 5u64, 15u64];
+            for (idx, delay) in backoff.iter().enumerate() {
+                if idx > 0 {
+                    std::thread::sleep(std::time::Duration::from_secs(*delay));
+                }
+                let attempt = idx as u32 + 1;
+                let response = client.post(url).body(body.clone()).send();
+                match response {
+                    Ok(resp) if resp.status().is_success() => {
+                        log_delivery(data_dir, session, event, hook.kind(), attempt, true, None);
+                        return Ok(());
+                    }
+                    Ok(resp) => {
+                        let err = format!("webhook returned {}", resp.status());
+                        log_delivery(
+                            data_dir,
+                            session,
+                            event,
+                            hook.kind(),
+                            attempt,
+                            false,
+                            Some(err.clone()),
+                        );
+                        if attempt == backoff.len() as u32 {
+                            anyhow::bail!(err);
+                        }
+                    }
+                    Err(err) => {
+                        let err_msg = err.to_string();
+                        log_delivery(
+                            data_dir,
+                            session,
+                            event,
+                            hook.kind(),
+                            attempt,
+                            false,
+                            Some(err_msg.clone()),
+                        );
+                        if attempt == backoff.len() as u32 {
+                            anyhow::bail!(err_msg);
+                        }
+                    }
+                }
             }
         }
     }
@@ -1364,6 +1445,53 @@ fn render_template(template: &str, session: &SessionRecord, event: NotificationE
         .replace("{{session_id}}", session.id.as_str())
         .replace("{{state}}", state)
         .replace("{{agent}}", &format!("{:?}", session.agent))
+}
+
+#[derive(serde::Serialize)]
+struct NotificationDelivery {
+    ts: DateTime<Utc>,
+    session_id: String,
+    event: String,
+    hook: NotificationKind,
+    attempt: u32,
+    success: bool,
+    error: Option<String>,
+}
+
+fn log_delivery(
+    data_dir: &Path,
+    session: &SessionRecord,
+    event: NotificationEvent,
+    hook: NotificationKind,
+    attempt: u32,
+    success: bool,
+    error: Option<String>,
+) {
+    let path = data_dir
+        .join("notifications")
+        .join("logs")
+        .join(format!("{}.jsonl", session.id.as_str()));
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let record = NotificationDelivery {
+        ts: Utc::now(),
+        session_id: session.id.as_str().to_string(),
+        event: match event {
+            NotificationEvent::WaitingInput => "waiting".to_string(),
+            NotificationEvent::Errored => "errored".to_string(),
+            NotificationEvent::IdleTimeout => "terminated".to_string(),
+        },
+        hook,
+        attempt,
+        success,
+        error,
+    };
+    if let Ok(line) = serde_json::to_string(&record)
+        && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
@@ -1460,6 +1588,7 @@ mod tests {
         let engine = NotificationEngine::new();
         let mut record = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
         record.id = forgemux_core::SessionId::from("S-0001");
+        let tmp = tempfile::tempdir().unwrap();
 
         let config = NotificationConfig {
             on_waiting_input: vec![NotificationHook::Desktop],
@@ -1469,8 +1598,22 @@ mod tests {
         };
 
         let runner = FakeRunner::default();
-        engine.maybe_notify(&config, &runner, &record, &SessionState::WaitingInput, None);
-        engine.maybe_notify(&config, &runner, &record, &SessionState::WaitingInput, None);
+        engine.maybe_notify(
+            &config,
+            &runner,
+            tmp.path(),
+            &record,
+            &SessionState::WaitingInput,
+            None,
+        );
+        engine.maybe_notify(
+            &config,
+            &runner,
+            tmp.path(),
+            &record,
+            &SessionState::WaitingInput,
+            None,
+        );
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
@@ -1494,6 +1637,7 @@ mod tests {
         let engine = NotificationEngine::new();
         let mut record = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
         record.id = forgemux_core::SessionId::from("S-0002");
+        let tmp = tempfile::tempdir().unwrap();
 
         let config = NotificationConfig {
             on_waiting_input: vec![
@@ -1512,6 +1656,7 @@ mod tests {
         engine.maybe_notify(
             &config,
             &runner,
+            tmp.path(),
             &record,
             &SessionState::WaitingInput,
             Some(&[NotificationKind::Command]),
@@ -1520,6 +1665,83 @@ mod tests {
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0][0], "echo");
+    }
+
+    #[test]
+    fn notification_delivery_writes_log() {
+        let engine = NotificationEngine::new();
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
+        record.id = forgemux_core::SessionId::from("S-0003");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let config = NotificationConfig {
+            on_waiting_input: vec![NotificationHook::Command {
+                program: "echo".to_string(),
+                args: vec!["ok".to_string()],
+            }],
+            on_error: vec![],
+            on_idle_timeout: vec![],
+            debounce_secs: 0,
+        };
+
+        let runner = FakeRunner::default();
+        engine.maybe_notify(
+            &config,
+            &runner,
+            tmp.path(),
+            &record,
+            &SessionState::WaitingInput,
+            None,
+        );
+
+        let log_path = tmp
+            .path()
+            .join("notifications")
+            .join("logs")
+            .join("S-0003.jsonl");
+        let content = std::fs::read_to_string(log_path).unwrap();
+        assert!(content.contains("\"success\":true"));
+        assert!(content.contains("\"event\":\"waiting\""));
+    }
+
+    #[test]
+    fn notification_falls_back_on_failure() {
+        let engine = NotificationEngine::new();
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
+        record.id = forgemux_core::SessionId::from("S-0004");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let config = NotificationConfig {
+            on_waiting_input: vec![
+                NotificationHook::Command {
+                    program: "fail".to_string(),
+                    args: vec!["no".to_string()],
+                },
+                NotificationHook::Command {
+                    program: "echo".to_string(),
+                    args: vec!["ok".to_string()],
+                },
+            ],
+            on_error: vec![],
+            on_idle_timeout: vec![],
+            debounce_secs: 0,
+        };
+
+        let runner = FakeRunner::default();
+        runner.set_status_for(&["fail"], 1);
+        engine.maybe_notify(
+            &config,
+            &runner,
+            tmp.path(),
+            &record,
+            &SessionState::WaitingInput,
+            None,
+        );
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][0], "fail");
+        assert_eq!(calls[1][0], "echo");
     }
 
     #[test]
