@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.11 - 2026-02-27
+
+- Add decision flow endpoints on forged and forward to hub.
+- Add credential scrubbing for decision contexts.
+- Add tmux session environment variables for hooks.
+
 ## 0.1.10 - 2026-02-27
 
 - Add session hub metadata types and risk scoring logic.

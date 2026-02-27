@@ -16,8 +16,9 @@ use axum::{
     routing::{get, post},
 };
 use base64::Engine;
-use forgemux_core::AgentType;
+use forgemux_core::{AgentType, DecisionAction, DecisionContext, Severity, scrub};
 use rand::RngCore;
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -43,6 +44,24 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DecisionRequest {
+    pub question: String,
+    pub context: DecisionContext,
+    pub severity: Severity,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub impact_repo_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DecisionResponseRequest {
+    pub action: DecisionAction,
+    pub reviewer: String,
+    pub comment: Option<String>,
+}
+
 pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -53,6 +72,11 @@ pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>)
         .route("/sessions/:id/logs", get(session_logs::<R>))
         .route("/sessions/:id/input", post(session_input::<R>))
         .route("/sessions/:id/usage", get(session_usage::<R>))
+        .route("/sessions/:id/decision", post(create_decision::<R>))
+        .route(
+            "/sessions/:id/decision-response",
+            post(decision_response::<R>),
+        )
         .route("/foreman/report", get(foreman_report::<R>))
         .route("/sessions/:id/attach", get(ws_attach::<R>))
         .with_state(service)
@@ -330,6 +354,181 @@ async fn session_usage<R: CommandRunner + 'static>(
                 error: err.to_string(),
             }),
         )),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct HubDecisionPayload {
+    session_id: String,
+    workspace_id: String,
+    repo_id: String,
+    question: String,
+    context: DecisionContext,
+    severity: Severity,
+    tags: Vec<String>,
+    impact_repo_ids: Vec<String>,
+    assigned_to: Option<String>,
+    agent_goal: String,
+}
+
+async fn create_decision<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<DecisionRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
+    let record = service.session(&id).map_err(|err| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+    })?;
+    let hub_url = service.config().hub_url.clone().ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "hub_url not configured".to_string(),
+            }),
+        )
+    })?;
+
+    let payload = HubDecisionPayload {
+        session_id: record.id.as_str().to_string(),
+        workspace_id: "default".to_string(),
+        repo_id: record.repo_root.display().to_string(),
+        question: req.question,
+        context: scrub_context(req.context),
+        severity: req.severity,
+        tags: req.tags,
+        impact_repo_ids: req.impact_repo_ids,
+        assigned_to: None,
+        agent_goal: record.goal.unwrap_or_else(|| "(no goal set)".to_string()),
+    };
+
+    let client = Client::new();
+    let url = format!("{}/decisions", hub_url.trim_end_matches('/'));
+    let mut request = client.post(&url).json(&payload);
+    if let Some(token) = &service.config().hub_token {
+        request = request.bearer_auth(token);
+    }
+    let response = request.send().await.map_err(|err| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+    })?;
+    if !response.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: format!("hub returned {}", response.status()),
+            }),
+        ));
+    }
+    let value = response.json::<serde_json::Value>().await.map_err(|err| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(value))
+}
+
+async fn decision_response<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<DecisionResponseRequest>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
+    let session_id = forgemux_core::SessionId::from(id.as_str());
+    service.session(&id).map_err(|err| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+    })?;
+
+    let action = match req.action {
+        DecisionAction::Approve => "Approved",
+        DecisionAction::Deny => "Denied",
+        DecisionAction::Comment => "Comment",
+    };
+    let comment = req.comment.unwrap_or_default();
+    let message = if comment.is_empty() {
+        format!("{action} by {}\n", req.reviewer)
+    } else {
+        format!("{action} by {}: {comment}\n", req.reviewer)
+    };
+    service.send_keys(&session_id, &message).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+    })?;
+    Ok(Json(serde_json::json!({
+        "status": "ok",
+        "action": format!("{:?}", req.action).to_lowercase(),
+    })))
+}
+
+fn scrub_context(context: DecisionContext) -> DecisionContext {
+    match context {
+        DecisionContext::Diff { file, lines } => DecisionContext::Diff {
+            file: scrub(&file),
+            lines: lines
+                .into_iter()
+                .map(|mut line| {
+                    line.text = scrub(&line.text);
+                    line
+                })
+                .collect(),
+        },
+        DecisionContext::Log { text } => DecisionContext::Log { text: scrub(&text) },
+        DecisionContext::Screenshot { description } => DecisionContext::Screenshot {
+            description: scrub(&description),
+        },
     }
 }
 
@@ -793,6 +992,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn decision_endpoint_scrubs_context() {
+        let captured = Arc::new(std::sync::Mutex::new(None::<serde_json::Value>));
+        let captured_clone = captured.clone();
+        let hub_app = Router::new().route(
+            "/decisions",
+            post(move |Json(payload): Json<serde_json::Value>| {
+                let captured = captured_clone.clone();
+                async move {
+                    *captured.lock().unwrap() = Some(payload.clone());
+                    Json(payload)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, hub_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        config.hub_url = Some(format!("http://{}", addr));
+        let runner = FakeRunner::default();
+        let service = Arc::new(SessionService::new(config, runner));
+        let app = build_router(service.clone());
+
+        let session = service
+            .start_session(AgentType::Claude, "sonnet", tmp.path())
+            .unwrap();
+
+        let body = serde_json::json!({
+            "question": "Ship it?",
+            "context": { "type": "log", "text": "token=abcdEFGH1234" },
+            "severity": "high",
+            "tags": ["release"],
+            "impact_repo_ids": ["repo-2"]
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/sessions/{}/decision", session.id.as_str()))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let captured = captured.lock().unwrap().clone().unwrap();
+        let text = captured
+            .get("context")
+            .and_then(|ctx| ctx.get("text"))
+            .and_then(|value| value.as_str())
+            .unwrap();
+        assert!(text.contains("[REDACTED_TOKEN]"));
+    }
+
+    #[tokio::test]
+    async fn decision_response_injects_tmux_input() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = Arc::new(SessionService::new(config, runner.clone()));
+        let app = build_router(service.clone());
+
+        let session = service
+            .start_session(AgentType::Claude, "sonnet", tmp.path())
+            .unwrap();
+
+        let body = serde_json::json!({
+            "action": "approve",
+            "reviewer": "jono",
+            "comment": "ok"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/sessions/{}/decision-response",
+                        session.id.as_str()
+                    ))
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let calls = runner.calls();
+        assert!(calls.iter().any(|call| {
+            call.contains(&"send-keys".to_string())
+                && call.contains(&"Approved by jono: ok".to_string())
+        }));
     }
 
     #[tokio::test]

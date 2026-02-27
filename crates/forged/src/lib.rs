@@ -213,6 +213,7 @@ pub struct ForgedConfig {
     pub notifications: NotificationConfig,
     pub node_id: Option<String>,
     pub hub_url: Option<String>,
+    pub hub_token: Option<String>,
     pub advertise_addr: Option<String>,
     pub event_ring_capacity: usize,
     pub input_dedup_window: usize,
@@ -265,6 +266,7 @@ impl ForgedConfig {
             },
             node_id: None,
             hub_url: None,
+            hub_token: None,
             advertise_addr: None,
             event_ring_capacity: 512,
             input_dedup_window: 1000,
@@ -326,6 +328,7 @@ impl ForgedConfig {
         }
         config.node_id = file.node_id;
         config.hub_url = file.hub_url;
+        config.hub_token = file.hub_token;
         config.advertise_addr = file.advertise_addr;
         if let Some(event_ring_capacity) = file.event_ring_capacity {
             config.event_ring_capacity = event_ring_capacity;
@@ -364,6 +367,7 @@ struct ForgedConfigFile {
     pub notifications: Option<NotificationConfigFile>,
     pub node_id: Option<String>,
     pub hub_url: Option<String>,
+    pub hub_token: Option<String>,
     pub advertise_addr: Option<String>,
     pub event_ring_capacity: Option<usize>,
     pub input_dedup_window: Option<usize>,
@@ -659,6 +663,13 @@ impl<R: CommandRunner> SessionService<R> {
         }
 
         self.ensure_transcript_pipe(&record)?;
+        self.set_tmux_env(&record.id, "SESSION_ID", record.id.as_str())?;
+        if let Some(addr) = self.config.advertise_addr.clone() {
+            self.set_tmux_env(&record.id, "FORGED_ADDR", &addr)?;
+            if let Some(port) = addr.rsplit(':').next() {
+                self.set_tmux_env(&record.id, "FORGED_PORT", port)?;
+            }
+        }
 
         let expected = record.version;
         record.touch_state(SessionState::Running);
@@ -724,6 +735,13 @@ impl<R: CommandRunner> SessionService<R> {
         }
 
         self.ensure_transcript_pipe(&record)?;
+        self.set_tmux_env(&record.id, "SESSION_ID", record.id.as_str())?;
+        if let Some(addr) = self.config.advertise_addr.clone() {
+            self.set_tmux_env(&record.id, "FORGED_ADDR", &addr)?;
+            if let Some(port) = addr.rsplit(':').next() {
+                self.set_tmux_env(&record.id, "FORGED_PORT", port)?;
+            }
+        }
         let expected = record.version;
         record.touch_state(SessionState::Running);
         self.store.save_checked(&record, expected)?;
@@ -1065,6 +1083,29 @@ impl<R: CommandRunner> SessionService<R> {
                 "bytes": input.len(),
             }),
         );
+        Ok(())
+    }
+
+    fn set_tmux_env(
+        &self,
+        id: &forgemux_core::SessionId,
+        key: &str,
+        value: &str,
+    ) -> anyhow::Result<()> {
+        let args = vec![
+            "set-environment".to_string(),
+            "-t".to_string(),
+            id.as_str().to_string(),
+            key.to_string(),
+            value.to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &args)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux set-environment failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
         Ok(())
     }
 
@@ -1691,6 +1732,32 @@ mod tests {
     }
 
     #[test]
+    fn start_session_sets_tmux_env() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        config.tmux_bin = "tmux".to_string();
+        config.advertise_addr = Some("127.0.0.1:9999".to_string());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner.clone());
+
+        let record = service
+            .start_session(AgentType::Claude, "sonnet", tmp.path())
+            .unwrap();
+
+        let calls = runner.calls();
+        assert!(calls.iter().any(|call| {
+            call.contains(&"set-environment".to_string())
+                && call.contains(&record.id.as_str().to_string())
+                && call.contains(&"SESSION_ID".to_string())
+        }));
+        assert!(calls.iter().any(|call| {
+            call.contains(&"set-environment".to_string())
+                && call.contains(&"FORGED_PORT".to_string())
+                && call.contains(&"9999".to_string())
+        }));
+    }
+
+    #[test]
     fn start_session_writes_state_change_log() {
         let tmp = tempfile::tempdir().unwrap();
         let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
@@ -2264,6 +2331,7 @@ poll_interval_ms = 10
 snapshot_interval_ms = 999
 stream_encryption_key = "base64key"
 api_tokens = ["token-1", "token-2"]
+hub_token = "hub-secret"
 default_repo = "/tmp/project"
  
 [policies.restricted]
@@ -2298,6 +2366,7 @@ args = ["session={{session_id}}"]
         assert_eq!(config.waiting_threshold_secs, 25);
         assert_eq!(config.node_id.as_deref(), Some("edge-01"));
         assert_eq!(config.hub_url.as_deref(), Some("http://hub.local:8080"));
+        assert_eq!(config.hub_token.as_deref(), Some("hub-secret"));
         assert_eq!(config.advertise_addr.as_deref(), Some("edge-01.local:9443"));
         assert_eq!(config.event_ring_capacity, 42);
         assert_eq!(config.input_dedup_window, 55);
