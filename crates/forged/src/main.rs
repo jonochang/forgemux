@@ -51,20 +51,17 @@ fn main() -> anyhow::Result<()> {
     if let Some(data_dir) = cli.data_dir {
         config.data_dir = data_dir;
     }
-    let hub_info = config
-        .hub_url
-        .clone()
-        .map(|hub_url| {
-            let node_id = config
-                .node_id
-                .clone()
-                .unwrap_or_else(|| "edge-unknown".to_string());
-            let advertise_addr = config
-                .advertise_addr
-                .clone()
-                .unwrap_or_else(|| cli.bind.clone());
-            (hub_url, node_id, advertise_addr)
-        });
+    let hub_info = config.hub_url.clone().map(|hub_url| {
+        let node_id = config
+            .node_id
+            .clone()
+            .unwrap_or_else(|| "edge-unknown".to_string());
+        let advertise_addr = config
+            .advertise_addr
+            .clone()
+            .unwrap_or_else(|| cli.bind.clone());
+        (hub_url, node_id, advertise_addr)
+    });
     let service = SessionService::new(config, OsCommandRunner);
 
     match cli.command {
@@ -100,7 +97,7 @@ fn main() -> anyhow::Result<()> {
             });
         }
         Command::Check => {
-            let checks = forged::checks::run_checks(&service.config());
+            let checks = forged::checks::run_checks(service.config());
             let mut failed = false;
             for item in checks {
                 let status = if item.ok { "✓" } else { "✗" };
@@ -131,7 +128,7 @@ fn main() -> anyhow::Result<()> {
             println!("certs reloaded");
         }
         Command::Health => {
-            println!("{}", r#"{"status":"healthy"}"#);
+            println!(r#"{{"status":"healthy"}}"#);
         }
         Command::Version => {
             println!("forged 0.1.0");

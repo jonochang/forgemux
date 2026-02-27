@@ -81,11 +81,13 @@ fn check_agent(agent: &crate::AgentType, cfg: &AgentConfig) -> CheckItem {
 fn resolve_program(program: &str) -> Option<PathBuf> {
     let path = Path::new(program);
     if program.contains('/') {
-        return if path.exists() { Some(path.to_path_buf()) } else { None };
+        return if path.exists() {
+            Some(path.to_path_buf())
+        } else {
+            None
+        };
     }
-    let Some(paths) = std::env::var_os("PATH") else {
-        return None;
-    };
+    let paths = std::env::var_os("PATH")?;
     for dir in std::env::split_paths(&paths) {
         let candidate = dir.join(program);
         if candidate.exists() {

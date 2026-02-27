@@ -1,14 +1,14 @@
-use crate::{stream::StreamMessage, CommandRunner, SessionService, WorktreeSpec};
+use crate::{CommandRunner, SessionService, WorktreeSpec, stream::StreamMessage};
 use axum::{
+    Json, Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::HeaderMap,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use forgemux_core::AgentType;
 use serde::{Deserialize, Serialize};
@@ -36,9 +36,7 @@ pub struct ErrorResponse {
     pub error: String,
 }
 
-pub fn build_router<R: CommandRunner + 'static>(
-    service: Arc<SessionService<R>>,
-) -> Router {
+pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics::<R>))
@@ -110,7 +108,7 @@ async fn start_session<R: CommandRunner + 'static>(
                 Json(ErrorResponse {
                     error: "unknown agent".to_string(),
                 }),
-            ))
+            ));
         }
     };
 
@@ -145,7 +143,7 @@ async fn start_session<R: CommandRunner + 'static>(
                             Json(ErrorResponse {
                                 error: format!("unknown notify kind: {entry}"),
                             }),
-                        ))
+                        ));
                     }
                 };
                 kinds.push(kind);
@@ -329,12 +327,11 @@ fn authorized<R: CommandRunner>(
     if let Some(token) = token {
         return service.config().api_tokens.iter().any(|t| t == token);
     }
-    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(value) = value.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                return service.config().api_tokens.iter().any(|t| t == token);
-            }
-        }
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION)
+        && let Ok(value) = value.to_str()
+        && let Some(token) = value.strip_prefix("Bearer ")
+    {
+        return service.config().api_tokens.iter().any(|t| t == token);
     }
     false
 }
@@ -350,21 +347,17 @@ async fn handle_ws<R: CommandRunner + 'static>(
     let mut last_seen = 0u64;
     let mut control_mode = true;
 
-    if let Ok(Some(Ok(msg))) = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        socket.recv(),
-    )
-    .await
+    if let Ok(Some(Ok(msg))) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), socket.recv()).await
+        && let Message::Text(text) = msg
+        && let Ok(StreamMessage::Resume {
+            last_seen_event_id,
+            mode,
+        }) = serde_json::from_str::<StreamMessage>(&text)
     {
-        if let Message::Text(text) = msg {
-            if let Ok(StreamMessage::Resume { last_seen_event_id, mode }) =
-                serde_json::from_str::<StreamMessage>(&text)
-            {
-                last_seen = last_seen_event_id.unwrap_or(0);
-                if let Some(mode) = mode {
-                    control_mode = mode != "watch";
-                }
-            }
+        last_seen = last_seen_event_id.unwrap_or(0);
+        if let Some(mode) = mode {
+            control_mode = mode != "watch";
         }
     }
 
@@ -394,8 +387,9 @@ async fn handle_ws<R: CommandRunner + 'static>(
         }
     }
 
-    let mut snapshot_tick =
-        tokio::time::interval(std::time::Duration::from_millis(service.config().snapshot_interval_ms));
+    let mut snapshot_tick = tokio::time::interval(std::time::Duration::from_millis(
+        service.config().snapshot_interval_ms,
+    ));
 
     loop {
         tokio::select! {
@@ -413,16 +407,15 @@ async fn handle_ws<R: CommandRunner + 'static>(
                         }
                     }
                     Some(Ok(Message::Binary(bytes))) => {
-                        if let Ok(text) = String::from_utf8(bytes) {
-                            if let Ok(StreamMessage::Input { input_id, data }) =
+                        if let Ok(text) = String::from_utf8(bytes)
+                            && let Ok(StreamMessage::Input { input_id, data }) =
                                 serde_json::from_str::<StreamMessage>(&text)
-                            {
-                                if control_mode && manager.accept_input(&session_id, &input_id) {
-                                    let _ = service.send_keys(&session_id, &data);
-                                }
-                                let ack = StreamMessage::Ack { input_id };
-                                let _ = socket.send(Message::Text(serde_json::to_string(&ack).unwrap())).await;
+                        {
+                            if control_mode && manager.accept_input(&session_id, &input_id) {
+                                let _ = service.send_keys(&session_id, &data);
                             }
+                            let ack = StreamMessage::Ack { input_id };
+                            let _ = socket.send(Message::Text(serde_json::to_string(&ack).unwrap())).await;
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
@@ -430,15 +423,15 @@ async fn handle_ws<R: CommandRunner + 'static>(
                 }
             }
             _ = tokio::time::sleep(std::time::Duration::from_millis(service.config().poll_interval_ms)) => {
-                if let Ok(snapshot) = service.capture_output(&session_id, service.config().snapshot_lines) {
-                    if snapshot != last_snapshot {
-                        let event = manager.push_event(&session_id, snapshot.clone());
-                        let payload = StreamMessage::Event { event_id: event.id, data: event.data };
-                        if socket.send(Message::Text(serde_json::to_string(&payload).unwrap())).await.is_err() {
-                            break;
-                        }
-                        last_snapshot = snapshot;
+                if let Ok(snapshot) = service.capture_output(&session_id, service.config().snapshot_lines)
+                    && snapshot != last_snapshot
+                {
+                    let event = manager.push_event(&session_id, snapshot.clone());
+                    let payload = StreamMessage::Event { event_id: event.id, data: event.data };
+                    if socket.send(Message::Text(serde_json::to_string(&payload).unwrap())).await.is_err() {
+                        break;
                     }
+                    last_snapshot = snapshot;
                 }
             }
             _ = snapshot_tick.tick() => {
@@ -470,7 +463,12 @@ mod tests {
         let app = build_router(service);
 
         let response = app
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -541,7 +539,12 @@ mod tests {
         let app = build_router(service);
 
         let response = app
-            .oneshot(Request::builder().uri("/foreman/report").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/foreman/report")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -578,7 +581,12 @@ mod tests {
 
         let response = app
             .clone()
-            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -622,7 +630,12 @@ mod tests {
         let app = build_router(service);
 
         let response = app
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);

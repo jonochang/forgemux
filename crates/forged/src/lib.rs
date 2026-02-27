@@ -1,8 +1,8 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use forgemux_core::{
-    sort_sessions, AgentType, InterventionLevel, SessionManager, SessionRecord, SessionRole,
-    SessionState, SessionStore, StateDetector, StateSignal,
+    AgentType, InterventionLevel, SessionManager, SessionRecord, SessionRole, SessionState,
+    SessionStore, StateDetector, StateSignal, sort_sessions,
 };
 use regex::Regex;
 use std::collections::HashMap;
@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::SystemTime;
 
-pub mod server;
 pub mod checks;
+pub mod server;
 pub mod stream;
 
 pub trait CommandRunner: Send + Sync {
@@ -30,6 +30,7 @@ impl CommandRunner for OsCommandRunner {
 
 #[cfg(test)]
 #[derive(Clone, Default)]
+#[allow(clippy::type_complexity)]
 pub struct FakeRunner {
     calls: std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>,
     pub should_fail: bool,
@@ -61,7 +62,10 @@ impl CommandRunner for FakeRunner {
             let overrides = self.overrides.lock().unwrap();
             let mut code = 0;
             for (pattern, status_code) in overrides.iter() {
-                if pattern.iter().all(|token| args.contains(token) || program == token) {
+                if pattern
+                    .iter()
+                    .all(|token| args.contains(token) || program == token)
+                {
                     code = *status_code;
                     break;
                 }
@@ -426,12 +430,10 @@ impl<R: CommandRunner> SessionService<R> {
             if forgemux_core::RepoRoot::discover(&repo_path).is_none() {
                 anyhow::bail!("--worktree requires a git repository");
             }
-            let worktree_path = spec.path.clone().unwrap_or_else(|| {
-                self.config
-                    .data_dir
-                    .join("worktrees")
-                    .join(&spec.branch)
-            });
+            let worktree_path = spec
+                .path
+                .clone()
+                .unwrap_or_else(|| self.config.data_dir.join("worktrees").join(&spec.branch));
             self.create_worktree(&repo_root, &worktree_path, &spec.branch)?;
             (worktree_path, Some(spec))
         } else {
@@ -557,7 +559,8 @@ impl<R: CommandRunner> SessionService<R> {
         let mut updated = Vec::new();
         for mut session in sessions {
             let output = self.capture_recent_output(&session.id)?;
-            let last_output_at = self.transcript_mtime(&session.id)
+            let last_output_at = self
+                .transcript_mtime(&session.id)
                 .unwrap_or(session.last_activity_at);
             let signal = StateSignal {
                 process_alive: self.has_session(&session.id),
@@ -585,10 +588,17 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn stop_session(&self, id: &str) -> anyhow::Result<()> {
         let id = forgemux_core::SessionId::from(id);
-        let args = vec!["kill-session".to_string(), "-t".to_string(), id.as_str().to_string()];
+        let args = vec![
+            "kill-session".to_string(),
+            "-t".to_string(),
+            id.as_str().to_string(),
+        ];
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
-            anyhow::bail!("tmux kill-session failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "tmux kill-session failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         let mut record = self.store.load(&id)?;
         record.touch_state(SessionState::Terminated);
@@ -787,7 +797,11 @@ impl<R: CommandRunner> SessionService<R> {
     }
 
     fn has_session(&self, id: &forgemux_core::SessionId) -> bool {
-        let args = vec!["has-session".to_string(), "-t".to_string(), id.as_str().to_string()];
+        let args = vec![
+            "has-session".to_string(),
+            "-t".to_string(),
+            id.as_str().to_string(),
+        ];
         self.runner
             .run(&self.config.tmux_bin, &args)
             .map(|out| out.status.success())
@@ -812,7 +826,10 @@ impl<R: CommandRunner> SessionService<R> {
         ];
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
-            anyhow::bail!("tmux pipe-pane failed: {}", String::from_utf8_lossy(&output.stderr));
+            anyhow::bail!(
+                "tmux pipe-pane failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         Ok(())
     }
@@ -846,7 +863,8 @@ impl<R: CommandRunner> SessionService<R> {
         let remote_exists = if branch_exists {
             false
         } else {
-            self.remote_branch_exists(repo_root, branch).unwrap_or(false)
+            self.remote_branch_exists(repo_root, branch)
+                .unwrap_or(false)
         };
         let mut args = vec![
             "-C".to_string(),
@@ -919,7 +937,10 @@ impl<R: CommandRunner> SessionService<R> {
     }
 
     fn transcript_path(&self, id: &forgemux_core::SessionId) -> PathBuf {
-        self.config.data_dir.join("transcripts").join(format!("{}.log", id.as_str()))
+        self.config
+            .data_dir
+            .join("transcripts")
+            .join(format!("{}.log", id.as_str()))
     }
 
     fn transcript_mtime(&self, id: &forgemux_core::SessionId) -> Option<DateTime<Utc>> {
@@ -1023,7 +1044,9 @@ impl NotificationEngine {
             SessionState::Terminated => Some(NotificationEvent::IdleTimeout),
             _ => None,
         };
-        let Some(event) = event else { return; };
+        let Some(event) = event else {
+            return;
+        };
 
         if !self.should_fire(session, event, config.debounce_secs) {
             return;
@@ -1036,23 +1059,28 @@ impl NotificationEngine {
         };
 
         for hook in hooks {
-            if let Some(kinds) = allowed {
-                if !kinds.contains(&hook.kind()) {
-                    continue;
-                }
+            if let Some(kinds) = allowed
+                && !kinds.contains(&hook.kind())
+            {
+                continue;
             }
             let _ = send_hook(runner, hook, session, event);
         }
     }
 
-    fn should_fire(&self, session: &SessionRecord, event: NotificationEvent, debounce: i64) -> bool {
+    fn should_fire(
+        &self,
+        session: &SessionRecord,
+        event: NotificationEvent,
+        debounce: i64,
+    ) -> bool {
         let now = Utc::now();
         let key = (session.id.as_str().to_string(), event);
         let mut guard = self.last_fired.lock().unwrap();
-        if let Some(last) = guard.get(&key) {
-            if (now - *last).num_seconds() < debounce {
-                return false;
-            }
+        if let Some(last) = guard.get(&key)
+            && (now - *last).num_seconds() < debounce
+        {
+            return false;
         }
         guard.insert(key, now);
         true
@@ -1074,11 +1102,7 @@ fn send_hook<R: CommandRunner>(
     session: &SessionRecord,
     event: NotificationEvent,
 ) -> anyhow::Result<()> {
-    let message = render_template(
-        "Session {{session_id}} is {{state}}",
-        session,
-        event,
-    );
+    let message = render_template("Session {{session_id}} is {{state}}", session, event);
     match hook {
         NotificationHook::Desktop => {
             let args = vec!["-a".to_string(), "forgemux".to_string(), message];
@@ -1159,11 +1183,7 @@ mod tests {
     #[test]
     fn notification_engine_debounces() {
         let engine = NotificationEngine::new();
-        let mut record = SessionRecord::new(
-            AgentType::Claude,
-            "sonnet",
-            PathBuf::from("/tmp"),
-        );
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
         record.id = forgemux_core::SessionId::from("S-0001");
 
         let config = NotificationConfig {
@@ -1174,20 +1194,8 @@ mod tests {
         };
 
         let runner = FakeRunner::default();
-        engine.maybe_notify(
-            &config,
-            &runner,
-            &record,
-            &SessionState::WaitingInput,
-            None,
-        );
-        engine.maybe_notify(
-            &config,
-            &runner,
-            &record,
-            &SessionState::WaitingInput,
-            None,
-        );
+        engine.maybe_notify(&config, &runner, &record, &SessionState::WaitingInput, None);
+        engine.maybe_notify(&config, &runner, &record, &SessionState::WaitingInput, None);
 
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
@@ -1195,11 +1203,7 @@ mod tests {
 
     #[test]
     fn render_template_expands_session_values() {
-        let record = SessionRecord::new(
-            AgentType::Codex,
-            "o3",
-            PathBuf::from("/tmp"),
-        );
+        let record = SessionRecord::new(AgentType::Codex, "o3", PathBuf::from("/tmp"));
         let rendered = render_template(
             "id={{session_id}} state={{state}} agent={{agent}}",
             &record,
@@ -1213,11 +1217,7 @@ mod tests {
     #[test]
     fn notification_kinds_filter_hooks() {
         let engine = NotificationEngine::new();
-        let mut record = SessionRecord::new(
-            AgentType::Claude,
-            "sonnet",
-            PathBuf::from("/tmp"),
-        );
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
         record.id = forgemux_core::SessionId::from("S-0002");
 
         let config = NotificationConfig {
@@ -1258,12 +1258,7 @@ mod tests {
         let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
         let runner = FakeRunner::default();
         runner.set_status_for(
-            &[
-                "git",
-                "rev-parse",
-                "--verify",
-                "refs/heads/test-branch",
-            ],
+            &["git", "rev-parse", "--verify", "refs/heads/test-branch"],
             1,
         );
         let service = SessionService::new(config, runner.clone());
@@ -1304,7 +1299,11 @@ mod tests {
         service.send_keys(&id, "echo hi\n").unwrap();
 
         let calls = runner.calls();
-        assert!(calls.iter().any(|call| call.contains(&"send-keys".to_string())));
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.contains(&"send-keys".to_string()))
+        );
     }
 
     #[test]
@@ -1377,14 +1376,7 @@ mod tests {
         let service = SessionService::new(config, runner);
 
         let record = service
-            .start_session_with_worktree(
-                AgentType::Claude,
-                "sonnet",
-                "",
-                None,
-                None,
-                None,
-            )
+            .start_session_with_worktree(AgentType::Claude, "sonnet", "", None, None, None)
             .unwrap();
         assert_eq!(record.repo_root, repo);
     }
@@ -1464,10 +1456,7 @@ args = ["session={{session_id}}"]
         assert_eq!(config.waiting_threshold_secs, 25);
         assert_eq!(config.node_id.as_deref(), Some("edge-01"));
         assert_eq!(config.hub_url.as_deref(), Some("http://hub.local:8080"));
-        assert_eq!(
-            config.advertise_addr.as_deref(),
-            Some("edge-01.local:9443")
-        );
+        assert_eq!(config.advertise_addr.as_deref(), Some("edge-01.local:9443"));
         assert_eq!(config.event_ring_capacity, 42);
         assert_eq!(config.input_dedup_window, 55);
         assert_eq!(config.snapshot_lines, 123);
@@ -1478,7 +1467,10 @@ args = ["session={{session_id}}"]
         assert_eq!(config.default_repo, Some(PathBuf::from("/tmp/project")));
         let claude = config.agents.get(&AgentType::Claude).unwrap();
         assert_eq!(claude.command, "claude-custom");
-        assert_eq!(claude.args, vec!["--model".to_string(), "haiku".to_string()]);
+        assert_eq!(
+            claude.args,
+            vec!["--model".to_string(), "haiku".to_string()]
+        );
         assert_eq!(claude.prompt_patterns, vec!["(?m)^>$".to_string()]);
         assert_eq!(config.notifications.debounce_secs, 42);
         assert_eq!(config.notifications.on_waiting_input.len(), 1);

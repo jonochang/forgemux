@@ -218,7 +218,7 @@
         const payload = JSON.stringify({
           type: "input",
           input_id: inputId,
-          data: value + "\\n",
+          data: value + "\n",
         });
         if (!attachSocket || attachSocket.readyState !== WebSocket.OPEN) {
           pendingInputs.push(payload);

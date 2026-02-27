@@ -51,6 +51,12 @@ pub enum InterventionLevel {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct SessionId(String);
 
+impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SessionId {
     pub fn new() -> Self {
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -233,7 +239,7 @@ impl StateDetector {
     pub fn detect(&self, now: DateTime<Utc>, signal: &StateSignal) -> SessionState {
         if !signal.process_alive {
             return match signal.exit_code {
-                Some(code) if code == 0 => SessionState::Terminated,
+                Some(0) => SessionState::Terminated,
                 Some(_) => SessionState::Errored,
                 None => SessionState::Errored,
             };
@@ -333,11 +339,7 @@ mod tests {
     fn session_store_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
         let store = SessionStore::new(tmp.path());
-        let mut record = SessionRecord::new(
-            AgentType::Claude,
-            "sonnet",
-            tmp.path().to_path_buf(),
-        );
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
         record.touch_state(SessionState::Running);
         store.save(&record).unwrap();
 
@@ -411,11 +413,7 @@ mod tests {
 
     fn init_git_repo(path: &Path) {
         std::fs::create_dir_all(path).unwrap();
-        let status = Command::new("git")
-            .arg("init")
-            .arg(path)
-            .status()
-            .unwrap();
+        let status = Command::new("git").arg("init").arg(path).status().unwrap();
         assert!(status.success());
 
         let readme = path.join("README.md");
@@ -444,16 +442,11 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
-
     }
 
     #[test]
     fn state_detector_marks_waiting_input() {
-        let detector = StateDetector::new(
-            60,
-            10,
-            vec![Regex::new(r"(?m)^>\s*$").unwrap()],
-        );
+        let detector = StateDetector::new(60, 10, vec![Regex::new(r"(?m)^>\s*$").unwrap()]);
         let signal = StateSignal {
             process_alive: true,
             exit_code: None,
@@ -506,19 +499,11 @@ mod tests {
     #[test]
     fn sort_sessions_prioritizes_waiting_input() {
         let now = Utc::now();
-        let mut waiting = SessionRecord::new(
-            AgentType::Claude,
-            "sonnet",
-            PathBuf::from("/tmp"),
-        );
+        let mut waiting = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
         waiting.state = SessionState::WaitingInput;
         waiting.last_activity_at = now - chrono::Duration::seconds(300);
 
-        let mut running = SessionRecord::new(
-            AgentType::Claude,
-            "sonnet",
-            PathBuf::from("/tmp"),
-        );
+        let mut running = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
         running.state = SessionState::Running;
         running.last_activity_at = now;
 

@@ -1,11 +1,11 @@
 use clap::{Parser, Subcommand};
 use forged::{ForgedConfig, OsCommandRunner, SessionService};
-use forgemux_core::{sort_sessions, AgentType, SessionState};
+use forgemux_core::{AgentType, SessionState, sort_sessions};
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::thread;
 use std::time::Duration;
 
@@ -155,10 +155,14 @@ fn main() {
                 repo: repo.unwrap_or_default(),
                 worktree: worktree_spec.is_some(),
                 branch: worktree_spec.as_ref().map(|spec| spec.branch.clone()),
-                worktree_path: worktree_spec.as_ref().and_then(|spec| {
-                    spec.path.as_ref().map(|p| p.to_string_lossy().to_string())
-                }),
-                notify: if notify.is_empty() { None } else { Some(notify) },
+                worktree_path: worktree_spec
+                    .as_ref()
+                    .and_then(|spec| spec.path.as_ref().map(|p| p.to_string_lossy().to_string())),
+                notify: if notify.is_empty() {
+                    None
+                } else {
+                    Some(notify)
+                },
                 policy,
             };
 
@@ -179,11 +183,11 @@ fn main() {
                     }
                 }
                 Ok(resp) => {
-                    let body = resp
-                        .json::<forged::server::ErrorResponse>()
-                        .unwrap_or(forged::server::ErrorResponse {
+                    let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                        forged::server::ErrorResponse {
                             error: "unknown error".to_string(),
-                        });
+                        },
+                    );
                     eprintln!("start failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -227,11 +231,11 @@ fn main() {
             match response {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
-                    let body = resp
-                        .json::<forged::server::ErrorResponse>()
-                        .unwrap_or(forged::server::ErrorResponse {
+                    let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                        forged::server::ErrorResponse {
                             error: "unknown error".to_string(),
-                        });
+                        },
+                    );
                     eprintln!("stop failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -256,11 +260,11 @@ fn main() {
             match response {
                 Ok(resp) if resp.status().is_success() => {}
                 Ok(resp) => {
-                    let body = resp
-                        .json::<forged::server::ErrorResponse>()
-                        .unwrap_or(forged::server::ErrorResponse {
+                    let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                        forged::server::ErrorResponse {
                             error: "unknown error".to_string(),
-                        });
+                        },
+                    );
                     eprintln!("kill failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -284,11 +288,11 @@ fn main() {
                     print_sessions(sessions);
                 }
                 Ok(resp) => {
-                    let body = resp
-                        .json::<forged::server::ErrorResponse>()
-                        .unwrap_or(forged::server::ErrorResponse {
+                    let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                        forged::server::ErrorResponse {
                             error: "unknown error".to_string(),
-                        });
+                        },
+                    );
                     eprintln!("ls failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -310,27 +314,27 @@ fn main() {
                 Ok(resp) if resp.status().is_success() => {
                     let sessions: Vec<forgemux_core::SessionRecord> = resp.json().unwrap();
                     let sessions = sort_sessions(sessions);
-                match sessions.into_iter().find(|s| s.id.as_str() == session_id) {
-                    Some(session) => {
-                        println!("ID: {}", session.id);
-                        println!("Agent: {:?}", session.agent);
-                        println!("Model: {}", session.model);
-                        println!("State: {:?}", session.state);
-                        println!("Repo: {}", session.repo_root.display());
-                        println!("Last activity: {}", session.last_activity_at);
+                    match sessions.into_iter().find(|s| s.id.as_str() == session_id) {
+                        Some(session) => {
+                            println!("ID: {}", session.id);
+                            println!("Agent: {:?}", session.agent);
+                            println!("Model: {}", session.model);
+                            println!("State: {:?}", session.state);
+                            println!("Repo: {}", session.repo_root.display());
+                            println!("Last activity: {}", session.last_activity_at);
+                        }
+                        None => {
+                            eprintln!("session not found");
+                            std::process::exit(1);
+                        }
                     }
-                    None => {
-                        eprintln!("session not found");
-                        std::process::exit(1);
-                    }
-                }
                 }
                 Ok(resp) => {
-                    let body = resp
-                        .json::<forged::server::ErrorResponse>()
-                        .unwrap_or(forged::server::ErrorResponse {
+                    let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                        forged::server::ErrorResponse {
                             error: "unknown error".to_string(),
-                        });
+                        },
+                    );
                     eprintln!("status failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -365,11 +369,11 @@ fn main() {
                         }
                     }
                     Ok(resp) => {
-                        let body = resp
-                            .json::<forged::server::ErrorResponse>()
-                            .unwrap_or(forged::server::ErrorResponse {
+                        let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                            forged::server::ErrorResponse {
                                 error: "unknown error".to_string(),
-                            });
+                            },
+                        );
                         eprintln!("logs failed: {}", body.error);
                         std::process::exit(1);
                     }
@@ -411,11 +415,11 @@ fn main() {
                             last_content = content;
                         }
                         Ok(resp) => {
-                            let body = resp
-                                .json::<forged::server::ErrorResponse>()
-                                .unwrap_or(forged::server::ErrorResponse {
+                            let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                                forged::server::ErrorResponse {
                                     error: "unknown error".to_string(),
-                                });
+                                },
+                            );
                             eprintln!("logs failed: {}", body.error);
                             std::process::exit(1);
                         }
@@ -442,11 +446,11 @@ fn main() {
                     print_sessions(sessions);
                 }
                 Ok(resp) => {
-                    let body = resp
-                        .json::<forged::server::ErrorResponse>()
-                        .unwrap_or(forged::server::ErrorResponse {
+                    let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                        forged::server::ErrorResponse {
                             error: "unknown error".to_string(),
-                        });
+                        },
+                    );
                     eprintln!("watch failed: {}", body.error);
                     std::process::exit(1);
                 }
@@ -576,7 +580,9 @@ fn main() {
                 edge_addr.trim_end_matches('/'),
                 session_id
             );
-            let mut req = client.post(url).json(&serde_json::json!({ "input": input }));
+            let mut req = client
+                .post(url)
+                .json(&serde_json::json!({ "input": input }));
             if let Some(token) = token.as_deref() {
                 req = req.bearer_auth(token);
             }
@@ -642,7 +648,10 @@ fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {
             SessionState::Provisioning => "provisioning",
             SessionState::Starting => "starting",
         };
-        println!("{}\t{:?}\t{}\t{}", session.id, session.agent, session.model, state);
+        println!(
+            "{}\t{:?}\t{}\t{}",
+            session.id, session.agent, session.model, state
+        );
     }
 }
 
@@ -697,10 +706,10 @@ fn resolve_token(token: Option<&str>, config: &CliConfig) -> Option<String> {
 }
 
 fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(stripped) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return PathBuf::from(home).join(stripped);
-        }
+    if let Some(stripped) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(stripped);
     }
     PathBuf::from(path)
 }
@@ -730,10 +739,7 @@ mel-01 = "edge-mel-01.tailnet:9443"
             resolve_edge(Some("http://127.0.0.1:9090"), None, &config),
             "http://127.0.0.1:9090"
         );
-        assert_eq!(
-            resolve_edge(None, None, &config),
-            "https://hub.example"
-        );
+        assert_eq!(resolve_edge(None, None, &config), "https://hub.example");
     }
 
     #[test]

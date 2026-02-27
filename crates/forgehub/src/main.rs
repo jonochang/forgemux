@@ -1,24 +1,27 @@
 use axum::{
+    Json, Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, HeaderValue},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
-use futures_util::{future::join_all, SinkExt, StreamExt};
 use clap::{Parser, Subcommand};
 use forgehub::{EdgeRegistration, HubConfig, HubService};
+use futures_util::{SinkExt, StreamExt, future::join_all};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tower_http::services::ServeDir;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
-use std::collections::VecDeque;
+use tower_http::services::ServeDir;
 
-const DASHBOARD_HTML: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../dashboard/index.html"));
+const DASHBOARD_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../dashboard/index.html"
+));
 
 #[derive(Debug, Subcommand)]
 enum Command {
@@ -143,13 +146,14 @@ async fn list_sessions(
         )
             .into_response();
     }
-    (axum::http::StatusCode::OK, Json(fetch_sessions(&service).await)).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(fetch_sessions(&service).await),
+    )
+        .into_response()
 }
 
-async fn metrics(
-    State(service): State<Arc<HubService>>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn metrics(State(service): State<Arc<HubService>>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&service, &headers, None) {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
@@ -197,14 +201,12 @@ async fn fetch_sessions(service: &HubService) -> Vec<forgemux_core::SessionRecor
         async move { client.get(url).send().await }
     });
     let mut sessions = Vec::new();
-    for response in join_all(futures).await {
-        if let Ok(resp) = response {
-            if resp.status().is_success() {
-                if let Ok(mut edge_sessions) = resp.json::<Vec<forgemux_core::SessionRecord>>().await
-                {
-                    sessions.append(&mut edge_sessions);
-                }
-            }
+    for response in join_all(futures).await.into_iter().flatten() {
+        if response.status().is_success()
+            && let Ok(mut edge_sessions) =
+                response.json::<Vec<forgemux_core::SessionRecord>>().await
+        {
+            sessions.append(&mut edge_sessions);
         }
     }
     forgemux_core::sort_sessions(sessions)
@@ -221,7 +223,11 @@ async fn list_edges(
         )
             .into_response();
     }
-    (axum::http::StatusCode::OK, Json(service.list_registered_edges())).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(service.list_registered_edges()),
+    )
+        .into_response()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -256,7 +262,11 @@ async fn heartbeat(
     Json(req): Json<HeartbeatRequest>,
 ) -> impl IntoResponse {
     if !authorized(&service, &headers, None) {
-        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
     }
     match service.heartbeat(&req.id) {
         Some(reg) => (axum::http::StatusCode::OK, Json(reg)).into_response(),
@@ -274,7 +284,11 @@ async fn start_session(
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if !authorized(&service, &headers, None) {
-        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
     }
     let Some(edge) = service.pick_edge() else {
         return (
@@ -307,20 +321,23 @@ async fn stop_session(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     if !authorized(&service, &headers, None) {
-        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
     }
     let edges = service.list_registered_edges();
     for edge in edges {
-        let url = format!(
-            "{}/sessions/{}/stop",
-            normalize_http_addr(&edge.addr),
-            id
-        );
-        if let Ok(resp) = reqwest::Client::new().post(url).send().await {
-            if resp.status().is_success() {
-                return (axum::http::StatusCode::OK, Json(serde_json::json!({ "status": "stopped" })))
-                    .into_response();
-            }
+        let url = format!("{}/sessions/{}/stop", normalize_http_addr(&edge.addr), id);
+        if let Ok(resp) = reqwest::Client::new().post(url).send().await
+            && resp.status().is_success()
+        {
+            return (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({ "status": "stopped" })),
+            )
+                .into_response();
         }
     }
     (
@@ -336,23 +353,23 @@ async fn session_logs(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     if !authorized(&service, &headers, None) {
-        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
     }
     let edges = service.list_registered_edges();
     for edge in edges {
-        let url = format!(
-            "{}/sessions/{}/logs",
-            normalize_http_addr(&edge.addr),
-            id
-        );
-        if let Ok(resp) = reqwest::Client::new().get(url).send().await {
-            if resp.status().is_success() {
-                let body = resp
-                    .json::<serde_json::Value>()
-                    .await
-                    .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
-                return (axum::http::StatusCode::OK, Json(body)).into_response();
-            }
+        let url = format!("{}/sessions/{}/logs", normalize_http_addr(&edge.addr), id);
+        if let Ok(resp) = reqwest::Client::new().get(url).send().await
+            && resp.status().is_success()
+        {
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+            return (axum::http::StatusCode::OK, Json(body)).into_response();
         }
     }
     (
@@ -369,20 +386,23 @@ async fn session_input(
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if !authorized(&service, &headers, None) {
-        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
     }
     let edges = service.list_registered_edges();
     for edge in edges {
-        let url = format!(
-            "{}/sessions/{}/input",
-            normalize_http_addr(&edge.addr),
-            id
-        );
-        if let Ok(resp) = reqwest::Client::new().post(url).json(&payload).send().await {
-            if resp.status().is_success() {
-                return (axum::http::StatusCode::OK, Json(serde_json::json!({ "status": "sent" })))
-                    .into_response();
-            }
+        let url = format!("{}/sessions/{}/input", normalize_http_addr(&edge.addr), id);
+        if let Ok(resp) = reqwest::Client::new().post(url).json(&payload).send().await
+            && resp.status().is_success()
+        {
+            return (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({ "status": "sent" })),
+            )
+                .into_response();
         }
     }
     (
@@ -398,23 +418,23 @@ async fn session_usage(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     if !authorized(&service, &headers, None) {
-        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
     }
     let edges = service.list_registered_edges();
     for edge in edges {
-        let url = format!(
-            "{}/sessions/{}/usage",
-            normalize_http_addr(&edge.addr),
-            id
-        );
-        if let Ok(resp) = reqwest::Client::new().get(url).send().await {
-            if resp.status().is_success() {
-                let body = resp
-                    .json::<serde_json::Value>()
-                    .await
-                    .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
-                return (axum::http::StatusCode::OK, Json(body)).into_response();
-            }
+        let url = format!("{}/sessions/{}/usage", normalize_http_addr(&edge.addr), id);
+        if let Ok(resp) = reqwest::Client::new().get(url).send().await
+            && resp.status().is_success()
+        {
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+            return (axum::http::StatusCode::OK, Json(body)).into_response();
         }
     }
     (
@@ -429,7 +449,11 @@ async fn foreman_report(
     headers: HeaderMap,
 ) -> impl IntoResponse {
     if !authorized(&service, &headers, None) {
-        return (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "unauthorized" }))).into_response();
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
     }
     let Some(edge) = service.pick_edge() else {
         return (
@@ -511,12 +535,11 @@ fn authorized(service: &HubService, headers: &HeaderMap, token: Option<&str>) ->
     if let Some(token) = token {
         return service.is_token_valid(token);
     }
-    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(value) = value.to_str() {
-            if let Some(token) = value.strip_prefix("Bearer ") {
-                return service.is_token_valid(token);
-            }
-        }
+    if let Some(value) = headers.get(axum::http::header::AUTHORIZATION)
+        && let Ok(value) = value.to_str()
+        && let Some(token) = value.strip_prefix("Bearer ")
+    {
+        return service.is_token_valid(token);
     }
     false
 }
@@ -563,7 +586,9 @@ async fn relay_ws(ws_url: String, id: String, mut client: WebSocket) {
             }
         }
 
-        let Some(upstream_socket) = upstream.as_mut() else { continue };
+        let Some(upstream_socket) = upstream.as_mut() else {
+            continue;
+        };
         tokio::select! {
             msg = client.recv() => {
                 match msg {
@@ -583,10 +608,10 @@ async fn relay_ws(ws_url: String, id: String, mut client: WebSocket) {
             msg = upstream_socket.next() => {
                 match msg {
                     Some(Ok(msg)) => {
-                        if let Some(axum_msg) = to_axum(msg) {
-                            if client.send(axum_msg).await.is_err() {
-                                break;
-                            }
+                        if let Some(axum_msg) = to_axum(msg)
+                            && client.send(axum_msg).await.is_err()
+                        {
+                            break;
                         }
                     }
                     _ => {
@@ -742,9 +767,11 @@ mod tests {
     async fn session_input_proxies_to_edge() {
         let edge_app = Router::new().route(
             "/sessions/:id/input",
-            post(|axum::extract::Path(_id): axum::extract::Path<String>| async {
-                Json(serde_json::json!({ "status": "sent" }))
-            }),
+            post(
+                |axum::extract::Path(_id): axum::extract::Path<String>| async {
+                    Json(serde_json::json!({ "status": "sent" }))
+                },
+            ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -782,9 +809,11 @@ mod tests {
     async fn session_usage_proxies_to_edge() {
         let edge_app = Router::new().route(
             "/sessions/:id/usage",
-            get(|axum::extract::Path(_id): axum::extract::Path<String>| async {
-                Json(serde_json::json!({ "total_tokens": 0 }))
-            }),
+            get(
+                |axum::extract::Path(_id): axum::extract::Path<String>| async {
+                    Json(serde_json::json!({ "total_tokens": 0 }))
+                },
+            ),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -873,14 +902,25 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
-        let response = app.clone()
-            .oneshot(Request::builder().uri("/edges").body(Body::empty()).unwrap())
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/edges")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
 
         let response = app
-            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -899,7 +939,12 @@ mod tests {
             .with_state(service);
 
         let response = app
-            .oneshot(Request::builder().uri("/edges").body(Body::empty()).unwrap())
+            .oneshot(
+                Request::builder()
+                    .uri("/edges")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

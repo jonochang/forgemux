@@ -1,6 +1,6 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use forgemux_core::{sort_sessions, SessionRecord, SessionStore};
+use forgemux_core::{SessionRecord, SessionStore, sort_sessions};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -102,16 +102,33 @@ impl HubService {
     }
 
     pub fn resolve_ws_url(&self, edge_id: Option<&str>) -> Option<String> {
+        // Check static config edges first
         if let Some(id) = edge_id {
-            return self
+            let url = self
                 .config
                 .edges
                 .iter()
                 .find(|edge| edge.id == id)
                 .and_then(|edge| edge.ws_url.clone());
+            if url.is_some() {
+                return url;
+            }
         }
-        if self.config.edges.len() == 1 {
+        if self.config.edges.len() == 1 && self.config.edges[0].ws_url.is_some() {
             return self.config.edges[0].ws_url.clone();
+        }
+        // Fall back to dynamically registered edges
+        let guard = self.registry.lock().unwrap();
+        if let Some(id) = edge_id
+            && let Some(edge) = guard.get(id)
+        {
+            return Some(normalize_ws_addr(&edge.addr));
+        }
+        if guard.len() == 1 {
+            return guard
+                .values()
+                .next()
+                .map(|edge| normalize_ws_addr(&edge.addr));
         }
         None
     }
@@ -126,6 +143,18 @@ impl HubService {
             sessions.append(&mut edge_sessions);
         }
         Ok(sort_sessions(sessions))
+    }
+}
+
+fn normalize_ws_addr(addr: &str) -> String {
+    if addr.starts_with("ws://") || addr.starts_with("wss://") {
+        addr.to_string()
+    } else if let Some(rest) = addr.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = addr.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        format!("ws://{addr}")
     }
 }
 
