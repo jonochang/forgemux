@@ -16,7 +16,7 @@ use axum::{
     routing::{get, post},
 };
 use base64::Engine;
-use forgemux_core::{AgentType, DecisionAction, DecisionContext, Severity, scrub};
+use forgemux_core::{AgentType, DecisionAction, DecisionContext, ReplayEventType, Severity, scrub};
 use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -70,6 +70,7 @@ pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>)
         .route("/sessions/start", post(start_session::<R>))
         .route("/sessions/:id/stop", post(stop_session::<R>))
         .route("/sessions/:id/logs", get(session_logs::<R>))
+        .route("/sessions/:id/replay.jsonl", get(session_replay::<R>))
         .route("/sessions/:id/input", post(session_input::<R>))
         .route("/sessions/:id/usage", get(session_usage::<R>))
         .route("/sessions/:id/decision", post(create_decision::<R>))
@@ -286,6 +287,38 @@ async fn session_logs<R: CommandRunner + 'static>(
     }
 }
 
+async fn session_replay<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<String, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
+    match service.replay_jsonl(&id) {
+        Ok(content) => Ok(content),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct InputRequest {
     input: String,
@@ -422,6 +455,8 @@ async fn create_decision<R: CommandRunner + 'static>(
         assigned_to: None,
         agent_goal: record.goal.unwrap_or_else(|| "(no goal set)".to_string()),
     };
+    let replay_question = payload.question.clone();
+    let replay_repo_id = payload.repo_id.clone();
 
     let client = Client::new();
     let url = format!("{}/decisions", hub_url.trim_end_matches('/'));
@@ -453,6 +488,13 @@ async fn create_decision<R: CommandRunner + 'static>(
             }),
         )
     })?;
+    service.record_replay_event(
+        &record.id,
+        ReplayEventType::Decision,
+        format!("Decision requested: {replay_question}"),
+        None,
+        Some(replay_repo_id),
+    );
     Ok(Json(value))
 }
 
@@ -507,6 +549,13 @@ async fn decision_response<R: CommandRunner + 'static>(
             }),
         )
     })?;
+    service.record_replay_event(
+        &session_id,
+        ReplayEventType::Decision,
+        format!("{action} by {}", req.reviewer),
+        None,
+        None,
+    );
     Ok(Json(serde_json::json!({
         "status": "ok",
         "action": format!("{:?}", req.action).to_lowercase(),

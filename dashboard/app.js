@@ -4,6 +4,7 @@ import htm from "./lib/htm.module.js";
 import { TopNav } from "./components/nav.js";
 import { FleetDashboard } from "./components/fleet.js";
 import { DecisionQueue } from "./components/decisions.js";
+import { SessionReplay } from "./components/replay.js";
 import { workspace as baseWorkspace } from "./state.js";
 import { api } from "./services/api.js";
 import { connectWS } from "./services/ws.js";
@@ -29,6 +30,11 @@ function App() {
   const [decisions, setDecisions] = useState([]);
   const [connection, setConnection] = useState("connecting");
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("forgemux_reviewer") || "Operator");
+  const [replaySessionId, setReplaySessionId] = useState(null);
+  const [replayEvents, setReplayEvents] = useState([]);
+  const [replayDiff, setReplayDiff] = useState(null);
+  const [replayTerminal, setReplayTerminal] = useState(null);
+  const [replayTab, setReplayTab] = useState("diff");
   const workspace = baseWorkspace;
 
   useEffect(() => {
@@ -94,6 +100,33 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    if (!replaySessionId && sessions.length > 0) {
+      setReplaySessionId(sessions[0].id);
+    }
+  }, [replaySessionId, sessions]);
+
+  useEffect(() => {
+    if (view !== "replay" || !replaySessionId) return;
+    api
+      .replayTimeline(replaySessionId)
+      .then((data) => setReplayEvents(data.events || []))
+      .catch(() => setReplayEvents([]));
+    api
+      .replayDiff(replaySessionId)
+      .then(setReplayDiff)
+      .catch(() => setReplayDiff(null));
+    api
+      .replayTerminal(replaySessionId)
+      .then(setReplayTerminal)
+      .catch(() => setReplayTerminal(null));
+  }, [view, replaySessionId]);
+
+  const selectedSession = useMemo(
+    () => sessions.find((session) => session.id === replaySessionId) || sessions[0],
+    [sessions, replaySessionId]
+  );
+
   return html`<div>
     <${TopNav} view=${view} onViewChange=${setView} pendingCount=${pendingCount} connection=${connection} />
     ${view === "fleet" && html`<${FleetDashboard} sessions=${sessions} workspace=${workspace} />`}
@@ -104,7 +137,16 @@ function App() {
       reviewer=${reviewer}
       onAction=${handleDecisionAction}
     />`}
-    ${view === "replay" && html`<div style=${{ padding: "28px", color: "#98968F" }}>Session replay coming next.</div>`}
+    ${view === "replay" &&
+    html`<${SessionReplay}
+      session=${selectedSession}
+      workspace=${workspace}
+      events=${replayEvents}
+      tab=${replayTab}
+      onTabChange=${setReplayTab}
+      diff=${replayDiff}
+      terminal=${replayTerminal}
+    />`}
   </div>`;
 }
 

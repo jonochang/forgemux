@@ -93,6 +93,9 @@ fn main() -> anyhow::Result<()> {
                 .route("/sessions/:id/logs", get(session_logs))
                 .route("/sessions/:id/input", post(session_input))
                 .route("/sessions/:id/usage", get(session_usage))
+                .route("/sessions/:id/replay/timeline", get(replay_timeline))
+                .route("/sessions/:id/replay/diff", get(replay_diff))
+                .route("/sessions/:id/replay/terminal", get(replay_terminal))
                 .route("/foreman/report", get(foreman_report))
                 .route("/pairing/start", post(pairing_start))
                 .route("/pairing/exchange", post(pairing_exchange))
@@ -802,6 +805,100 @@ async fn session_usage(
         .into_response()
 }
 
+#[derive(Debug, Deserialize)]
+struct ReplayQuery {
+    after: Option<u64>,
+    limit: Option<u32>,
+}
+
+async fn replay_timeline(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<ReplayQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let limit = query.limit.unwrap_or(200).min(500);
+    match service.replay_timeline(&id, query.after, limit).await {
+        Ok((events, next_cursor)) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({ "events": events, "next_cursor": next_cursor })),
+        )
+            .into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn replay_diff(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(_id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({ "groups": [] })),
+    )
+        .into_response()
+}
+
+async fn replay_terminal(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let edges = service.list_registered_edges();
+    for edge in edges {
+        let url = format!("{}/sessions/{}/logs", normalize_http_addr(&edge.addr), id);
+        if let Ok(resp) = reqwest::Client::new().get(url).send().await
+            && resp.status().is_success()
+        {
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+            return (axum::http::StatusCode::OK, Json(body)).into_response();
+        }
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "session not found" })),
+    )
+        .into_response()
+}
+
 async fn foreman_report(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
@@ -1186,6 +1283,7 @@ mod tests {
     use super::*;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use forgemux_core::{ReplayEvent, ReplayEventType};
     use tower::util::ServiceExt;
 
     #[tokio::test]
@@ -1464,6 +1562,59 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn replay_timeline_returns_events() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
+        let event = ReplayEvent {
+            id: 0,
+            session_id: "S-1234".to_string(),
+            repo_id: Some("repo-1".to_string()),
+            timestamp: Utc::now(),
+            elapsed: "1m".to_string(),
+            event_type: ReplayEventType::Tool,
+            action: "cargo test".to_string(),
+            result: Some("pass".to_string()),
+            payload: None,
+        };
+        service.record_replay_event(event).await.unwrap();
+
+        let app = Router::new()
+            .route("/sessions/:id/replay/timeline", get(replay_timeline))
+            .with_state(service);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/S-1234/replay/timeline")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let action = json
+            .get("events")
+            .and_then(|events| events.as_array())
+            .and_then(|events| events.first())
+            .and_then(|event| event.get("action"))
+            .and_then(|value| value.as_str())
+            .unwrap();
+        assert_eq!(action, "cargo test");
     }
 
     #[test]

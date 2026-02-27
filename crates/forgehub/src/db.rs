@@ -2,8 +2,8 @@ use anyhow::Context;
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
 use forgemux_core::{
-    Decision, DecisionAction, DecisionContext, DecisionResolution, SessionHubMeta, SessionState,
-    Severity,
+    Decision, DecisionAction, DecisionContext, DecisionResolution, ReplayEvent, ReplayEventType,
+    SessionHubMeta, SessionState, Severity,
 };
 use sqlx::FromRow;
 use sqlx::SqlitePool;
@@ -52,6 +52,19 @@ struct DecisionRow {
     resolution_json: Option<String>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct ReplayEventRow {
+    id: i64,
+    session_id: String,
+    repo_id: Option<String>,
+    timestamp: String,
+    elapsed: String,
+    event_type: String,
+    action: String,
+    result: Option<String>,
+    payload: Option<String>,
+}
+
 pub async fn insert_decision(pool: &SqlitePool, decision: &Decision) -> anyhow::Result<()> {
     sqlx::query(
         r#"
@@ -82,6 +95,56 @@ pub async fn insert_decision(pool: &SqlitePool, decision: &Decision) -> anyhow::
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn insert_replay_event(pool: &SqlitePool, event: &ReplayEvent) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO replay_events (
+            session_id, repo_id, timestamp, elapsed, event_type, action, result, payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&event.session_id)
+    .bind(&event.repo_id)
+    .bind(event.timestamp.to_rfc3339())
+    .bind(&event.elapsed)
+    .bind(replay_type_to_str(&event.event_type))
+    .bind(&event.action)
+    .bind(&event.result)
+    .bind(match &event.payload {
+        Some(payload) => Some(serde_json::to_string(payload)?),
+        None => None,
+    })
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_replay_events(
+    pool: &SqlitePool,
+    session_id: &str,
+    after: Option<u64>,
+    limit: u32,
+) -> anyhow::Result<Vec<ReplayEvent>> {
+    let mut query = String::from(
+        r#"
+        SELECT id, session_id, repo_id, timestamp, elapsed, event_type, action, result, payload
+        FROM replay_events
+        WHERE session_id = ?
+        "#,
+    );
+    if after.is_some() {
+        query.push_str(" AND id > ?");
+    }
+    query.push_str(" ORDER BY id ASC LIMIT ?");
+
+    let mut q = sqlx::query_as::<_, ReplayEventRow>(&query).bind(session_id);
+    if let Some(after_id) = after {
+        q = q.bind(after_id as i64);
+    }
+    let rows = q.bind(limit as i64).fetch_all(pool).await?;
+    rows.into_iter().map(replay_event_from_row).collect()
 }
 
 pub async fn ensure_workspace(pool: &SqlitePool, workspace_id: &str) -> anyhow::Result<()> {
@@ -376,6 +439,24 @@ fn decision_from_row(row: DecisionRow) -> anyhow::Result<Decision> {
     })
 }
 
+fn replay_event_from_row(row: ReplayEventRow) -> anyhow::Result<ReplayEvent> {
+    let timestamp = DateTime::parse_from_rfc3339(&row.timestamp)?.with_timezone(&Utc);
+    Ok(ReplayEvent {
+        id: row.id as u64,
+        session_id: row.session_id,
+        repo_id: row.repo_id,
+        timestamp,
+        elapsed: row.elapsed,
+        event_type: replay_type_from_str(&row.event_type),
+        action: row.action,
+        result: row.result,
+        payload: match row.payload {
+            Some(payload) => Some(serde_json::from_str(&payload)?),
+            None => None,
+        },
+    })
+}
+
 fn severity_to_str(severity: Severity) -> &'static str {
     match severity {
         Severity::Critical => "critical",
@@ -395,6 +476,31 @@ fn severity_from_str(value: &str) -> anyhow::Result<Severity> {
     }
 }
 
+fn replay_type_to_str(event_type: &ReplayEventType) -> &'static str {
+    match event_type {
+        ReplayEventType::System => "system",
+        ReplayEventType::Read => "read",
+        ReplayEventType::Edit => "edit",
+        ReplayEventType::Tool => "tool",
+        ReplayEventType::Switch => "switch",
+        ReplayEventType::Test => "test",
+        ReplayEventType::Decision => "decision",
+    }
+}
+
+fn replay_type_from_str(raw: &str) -> ReplayEventType {
+    match raw {
+        "system" => ReplayEventType::System,
+        "read" => ReplayEventType::Read,
+        "edit" => ReplayEventType::Edit,
+        "tool" => ReplayEventType::Tool,
+        "switch" => ReplayEventType::Switch,
+        "test" => ReplayEventType::Test,
+        "decision" => ReplayEventType::Decision,
+        _ => ReplayEventType::System,
+    }
+}
+
 fn decision_action_to_str(action: DecisionAction) -> &'static str {
     match action {
         DecisionAction::Approve => "approve",
@@ -406,7 +512,9 @@ fn decision_action_to_str(action: DecisionAction) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use forgemux_core::{DecisionContext, DecisionResolution, DiffLine, DiffLineType};
+    use forgemux_core::{
+        DecisionContext, DecisionResolution, DiffLine, DiffLineType, ReplayEventType,
+    };
     use tempfile::tempdir;
 
     fn sample_decision(id: &str) -> Decision {
@@ -431,6 +539,20 @@ mod tests {
             created_at: Utc::now(),
             resolved_at: None,
             resolution: None,
+        }
+    }
+
+    fn sample_replay_event(session_id: &str, action: &str) -> ReplayEvent {
+        ReplayEvent {
+            id: 0,
+            session_id: session_id.to_string(),
+            repo_id: Some("repo-1".to_string()),
+            timestamp: Utc::now(),
+            elapsed: "1m".to_string(),
+            event_type: ReplayEventType::Tool,
+            action: action.to_string(),
+            result: None,
+            payload: None,
         }
     }
 
@@ -568,5 +690,24 @@ mod tests {
 
         let list = list_cached_sessions(&pool, "ws-1").await.unwrap();
         assert_eq!(list[0].state, SessionState::Unreachable);
+    }
+
+    #[tokio::test]
+    async fn replay_events_paginate() {
+        let tmp = tempdir().unwrap();
+        let pool = init_db(tmp.path()).await.unwrap();
+        let event1 = sample_replay_event("S-1", "git status");
+        let event2 = sample_replay_event("S-1", "cargo test");
+        insert_replay_event(&pool, &event1).await.unwrap();
+        insert_replay_event(&pool, &event2).await.unwrap();
+
+        let first = list_replay_events(&pool, "S-1", None, 1).await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].action, "git status");
+
+        let after = Some(first[0].id);
+        let second = list_replay_events(&pool, "S-1", after, 10).await.unwrap();
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].action, "cargo test");
     }
 }

@@ -1,8 +1,8 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use forgemux_core::{
-    Decision, DecisionAction, DecisionResolution, RiskLevel, SessionHubMeta, SessionRecord,
-    SessionStore, TestsStatus, sort_sessions,
+    Decision, DecisionAction, DecisionResolution, ReplayEvent, RiskLevel, SessionHubMeta,
+    SessionRecord, SessionStore, TestsStatus, sort_sessions,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -16,8 +16,9 @@ use tokio::time::{Duration, interval};
 mod db;
 mod risk;
 use db::{
-    decision_count, ensure_workspace, get_decision, init_db, insert_decision, list_decisions,
-    log_budget_action, mark_edge_sessions_unreachable, resolve_decision, upsert_session_cache,
+    decision_count, ensure_workspace, get_decision, init_db, insert_decision, insert_replay_event,
+    list_decisions, list_replay_events, log_budget_action, mark_edge_sessions_unreachable,
+    resolve_decision, upsert_session_cache,
 };
 use risk::compute_risk;
 
@@ -376,6 +377,25 @@ impl HubService {
             action,
         });
         Ok(())
+    }
+
+    pub async fn record_replay_event(&self, event: ReplayEvent) -> anyhow::Result<()> {
+        insert_replay_event(&self.db, &event).await
+    }
+
+    pub async fn replay_timeline(
+        &self,
+        session_id: &str,
+        after: Option<u64>,
+        limit: u32,
+    ) -> anyhow::Result<(Vec<ReplayEvent>, Option<u64>)> {
+        let events = list_replay_events(&self.db, session_id, after, limit).await?;
+        let next_cursor = if events.len() == limit as usize {
+            events.last().map(|event| event.id)
+        } else {
+            None
+        };
+        Ok((events, next_cursor))
     }
 
     fn next_decision_id(&self) -> String {

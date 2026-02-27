@@ -1,8 +1,8 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use forgemux_core::{
-    AgentType, InterventionLevel, SessionManager, SessionRecord, SessionRole, SessionState,
-    SessionStore, StateDetector, StateSignal, sort_sessions,
+    AgentType, InterventionLevel, ReplayEvent, ReplayEventType, SessionManager, SessionRecord,
+    SessionRole, SessionState, SessionStore, StateDetector, StateSignal, sort_sessions,
 };
 use regex::Regex;
 use std::collections::VecDeque;
@@ -681,6 +681,13 @@ impl<R: CommandRunner> SessionService<R> {
         if let Some(kinds) = notify {
             self.store_notification_prefs(&record.id, &kinds)?;
         }
+        self.record_replay_event(
+            &record.id,
+            ReplayEventType::System,
+            "Session started",
+            None,
+            None,
+        );
         Ok(record)
     }
 
@@ -930,6 +937,15 @@ impl<R: CommandRunner> SessionService<R> {
         let lines: Vec<&str> = content.lines().collect();
         let start = lines.len().saturating_sub(tail);
         Ok(lines[start..].join("\n"))
+    }
+
+    pub fn replay_jsonl(&self, id: &str) -> anyhow::Result<String> {
+        let id = forgemux_core::SessionId::from(id);
+        let path = self.replay_path(&id);
+        if !path.exists() {
+            return Ok(String::new());
+        }
+        Ok(fs::read_to_string(path)?)
     }
 
     fn build_detector(&self) -> StateDetector {
@@ -1319,6 +1335,49 @@ impl<R: CommandRunner> SessionService<R> {
         }
     }
 
+    fn replay_path(&self, id: &forgemux_core::SessionId) -> PathBuf {
+        self.config
+            .data_dir
+            .join("replay")
+            .join(format!("{}.jsonl", id.as_str()))
+    }
+
+    pub fn record_replay_event(
+        &self,
+        id: &forgemux_core::SessionId,
+        event_type: ReplayEventType,
+        action: impl Into<String>,
+        result: Option<String>,
+        repo_id: Option<String>,
+    ) {
+        let now = Utc::now();
+        let elapsed = self
+            .store
+            .load(id)
+            .map(|record| format_elapsed(now, record.created_at))
+            .unwrap_or_else(|_| "0s".to_string());
+        let event = ReplayEvent {
+            id: now.timestamp_millis() as u64,
+            session_id: id.as_str().to_string(),
+            repo_id,
+            timestamp: now,
+            elapsed,
+            event_type,
+            action: action.into(),
+            result,
+            payload: None,
+        };
+        let path = self.replay_path(id);
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(line) = serde_json::to_string(&event)
+            && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+        {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+
     fn load_notification_prefs(
         &self,
         id: &forgemux_core::SessionId,
@@ -1335,6 +1394,20 @@ impl<R: CommandRunner> SessionService<R> {
 
 fn system_time_to_chrono(time: SystemTime) -> DateTime<Utc> {
     DateTime::<Utc>::from(time)
+}
+
+fn format_elapsed(now: DateTime<Utc>, created_at: DateTime<Utc>) -> String {
+    let secs = (now - created_at).num_seconds().max(0);
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else if minutes > 0 {
+        format!("{minutes}m {seconds}s")
+    } else {
+        format!("{seconds}s")
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1776,6 +1849,27 @@ mod tests {
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("\"type\":\"state-change\""));
         assert!(content.contains("\"to\":\"Running\""));
+    }
+
+    #[test]
+    fn start_session_writes_replay_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        config.tmux_bin = "tmux".to_string();
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let record = service
+            .start_session(AgentType::Claude, "sonnet", tmp.path())
+            .unwrap();
+
+        let replay_path = tmp
+            .path()
+            .join("replay")
+            .join(format!("{}.jsonl", record.id.as_str()));
+        let content = std::fs::read_to_string(replay_path).unwrap();
+        assert!(content.contains("\"event_type\":\"system\""));
+        assert!(content.contains("Session started"));
     }
 
     #[test]

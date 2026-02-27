@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.14 - 2026-02-27
+
+- Add replay event types and hub replay timeline endpoint.
+- Add session replay dashboard view and forged replay JSONL logging.
+
 ## 0.1.13 - 2026-02-27
 
 - Add decision queue UI with repo filters and context panels.

@@ -41,4 +41,17 @@ export const api = {
       body: JSON.stringify(body),
     });
   },
+  replayTimeline(sessionId, after, limit) {
+    const qs = new URLSearchParams();
+    if (after != null) qs.set("after", after);
+    if (limit != null) qs.set("limit", limit);
+    const suffix = qs.toString();
+    return fetchJSON(`/sessions/${sessionId}/replay/timeline${suffix ? `?${suffix}` : ""}`);
+  },
+  replayDiff(sessionId) {
+    return fetchJSON(`/sessions/${sessionId}/replay/diff`);
+  },
+  replayTerminal(sessionId) {
+    return fetchJSON(`/sessions/${sessionId}/replay/terminal`);
+  },
 };
