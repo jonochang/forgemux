@@ -802,7 +802,7 @@ The session lives on the edge. Every client connection is ephemeral. Robustness 
 The entire reliable stream layer is built on five message types:
 
 ```
-RESUME(last_event_id, client_id)         Client → Edge
+RESUME(last_event_id, client_id, protocol_version)  Client → Edge
 EVENT(event_id, ts, stream, bytes)       Edge → Client
 INPUT(input_id, bytes, client_id)        Client → Edge
 ACK(input_id, client_id)                 Edge → Client
@@ -810,6 +810,14 @@ SNAPSHOT(snapshot_id, event_id, data)    Edge → Client
 ```
 
 This is sufficient to make browser and mobile attach reliable without modifying tmux.
+
+### Protocol Versioning
+
+The first message from the client (`RESUME`) includes a `protocol_version` field. The edge replies using the same version. If the version is unsupported, the edge returns a clear error and closes the connection. The compatibility policy is: **current version + one prior version** supported by the edge; older versions require a client upgrade.
+
+### Durable vs Ephemeral Events
+
+Every `EVENT` includes a `durable` flag. Durable events are written to the ring buffer and transcript and are replayed on `RESUME`. Ephemeral events (typing indicator, presence, live token counters) are broadcast to connected clients only and never persisted or replayed. This prevents stale realtime UX from being replayed after reconnects and keeps the ring buffer lean.
 
 ### Connection Lifecycle
 
@@ -875,11 +883,13 @@ struct OutputEvent {
     ts: DateTime<Utc>,
     stream: Stream,         // Stdout | Stderr
     data: Bytes,            // raw PTY bytes
+    durable: bool,          // stored + replayed when true
 }
 
 struct Resume {
     last_seen_event_id: u64,
     client_id: String,      // stable per client across reconnects
+    protocol_version: u32,
 }
 ```
 
