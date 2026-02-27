@@ -754,12 +754,9 @@ impl<R: CommandRunner> SessionService<R> {
     }
 
     pub fn send_keys(&self, id: &forgemux_core::SessionId, input: &str) -> anyhow::Result<()> {
-        let mut literal = input.replace('\r', "");
-        let mut needs_enter = false;
-        if literal.contains('\n') {
-            literal = literal.replace('\n', "");
-            needs_enter = true;
-        }
+        let cleaned = input.replace('\r', "");
+        let needs_enter = cleaned.ends_with('\n');
+        let literal = cleaned.trim_end_matches('\n');
 
         if !literal.is_empty() {
             let args = vec![
@@ -767,7 +764,7 @@ impl<R: CommandRunner> SessionService<R> {
                 "-t".to_string(),
                 id.as_str().to_string(),
                 "-l".to_string(),
-                literal,
+                literal.to_string(),
             ];
             let output = self.runner.run(&self.config.tmux_bin, &args)?;
             if !output.status.success() {
