@@ -53,11 +53,12 @@ The core value is twofold: sessions that don't die when your terminal closes, an
 
 **Detecting `WaitingInput`** is the hardest and most valuable state. Strategies, in order of preference:
 
-1. **Cursor position heuristic.** When the agent prints a prompt and the cursor sits at an input line with no output for a threshold period, the session is likely waiting. The sidecar monitors the tmux pane's cursor position and output activity.
-2. **Agent-specific prompt patterns.** Each agent CLI has a recognisable prompt string (e.g., Claude Code's `>` prompt, Codex's input marker). The sidecar matches recent terminal output against configurable regex patterns per agent type.
-3. **Process tree inspection.** When the agent's child process (the LLM call) has completed and the agent process is blocked on stdin, the session is waiting. Inspect `/proc/<pid>/status` and `/proc/<pid>/wchan`.
+1. **Structured agent log files.** When available, prefer the agent's own structured output over PTY heuristics. Claude Code writes JSONL session data (tool calls, permission requests, completions, errors) to `~/.claude/projects/`. The sidecar watches these files via `inotify`/`kqueue` and parses state-relevant events directly. This is higher fidelity than terminal scraping because it is decoupled from TUI rendering changes. PTY heuristics (below) serve as fallback for agents that lack structured logs.
+2. **Cursor position heuristic.** When the agent prints a prompt and the cursor sits at an input line with no output for a threshold period, the session is likely waiting. The sidecar monitors the tmux pane's cursor position and output activity.
+3. **Agent-specific prompt patterns.** Each agent CLI has a recognisable prompt string (e.g., Claude Code's `>` prompt, Codex's input marker). The sidecar matches recent terminal output against configurable regex patterns per agent type.
+4. **Process tree inspection.** When the agent's child process (the LLM call) has completed and the agent process is blocked on stdin, the session is waiting. Inspect `/proc/<pid>/status` and `/proc/<pid>/wchan`.
 
-The sidecar should use a combination of these — pattern match first, fall back to cursor + inactivity, corroborate with process state.
+The sidecar should use a combination of these — structured logs when the agent provides them, pattern match as primary PTY fallback, cursor + inactivity as secondary, corroborated with process state.
 
 **`fmux ls` output emphasises state:**
 
@@ -116,6 +117,8 @@ Sessions in `WaitingInput` sort to the top by default. The engineer's workflow b
   - `command` — run an arbitrary command with session metadata as env vars
 - Notifications fire on state transitions: `Running → WaitingInput`, `Running → Errored`, `Idle → Terminated` (timeout)
 - Debounce: no duplicate notifications for the same state within a configurable window
+- Delivery failure handling: webhook notifications retry with exponential backoff (3 attempts over 5 minutes). If the primary channel fails (e.g., desktop notification with no display attached), fall back to the next configured channel. Notification delivery attempts and outcomes are recorded in the session event log so engineers can verify delivery via `fmux status <id>`
+- Rate limiting: cap total notifications per session per hour to prevent spam from flapping sessions
 
 **Configuration:**
 
@@ -162,6 +165,12 @@ template = '{"text": "Session {{session_id}} ({{agent}}) is {{state}}"}'
 - mTLS between edge and hub
 - Notifications now include edge node identity
 
+**Machine/edge identity as a first-class entity.** Each edge node is modelled as a distinct machine entity in the hub, separate from the sessions it hosts. The machine record includes: node ID, advertise address, daemon version, capacity, health status, and last heartbeat timestamp. The hub exposes a `machine-heartbeat` endpoint that dashboards and monitoring tools can poll independently of session state. This separation ensures that session routing, dashboard edge health panels, and version tracking have a stable data model to build on.
+
+**Authority model.** The edge is the source of truth for session state. The hub is a cache and aggregator — it reflects what edges report but does not independently mutate session state. Commands routed through the hub (e.g., `fmux stop`) are relayed to the owning edge, which executes them and reports the resulting state change back to the hub.
+
+**Versioned state updates.** Both machine state and session metadata carry a version number. Updates use compare-and-swap semantics: the hub rejects stale writes and returns current state for retry. This prevents silent overwrites when multiple clients (CLI, dashboard, foreman) interact with the same session or when edges reconnect after a network partition.
+
 **Dependencies:** Phase 0, Phase 1.
 
 **Estimated effort:** 4–6 weeks.
@@ -181,6 +190,8 @@ template = '{"text": "Session {{session_id}} ({{agent}}) is {{state}}"}'
 | Dashboard | Minimal SPA: session list + xterm.js terminal with reconnect support |
 | `fmux` | `attach --mode web` opens browser |
 
+**Prerequisite deliverable: session event protocol schema.** Before building the WebSocket bridge, define the typed event envelope and ring buffer schema as a shared protocol crate (`forgemux-proto` or equivalent). This schema is consumed by `forged` (event production), `forgehub` (relay and store-and-forward), and the dashboard SPA (rendering). Deferring protocol design until mid-phase risks rework across all three consumers. The schema should be the first deliverable of this phase, covering: event envelope format, message type discriminants, durability classification (durable vs ephemeral — see below), and version negotiation fields.
+
 **Capabilities:**
 
 - Five-message wire protocol: `RESUME`, `EVENT`, `INPUT`, `ACK`, `SNAPSHOT`
@@ -193,23 +204,37 @@ template = '{"text": "Session {{session_id}} ({{agent}}) is {{state}}"}'
 - Watch mode (read-only, throttled) and Control mode (read-write, full ack/dedupe)
 - Adaptive fidelity: keystroke streaming degrades to line-mode under high RTT
 - Chunk coalescing and compression for bandwidth efficiency
-- Offline command queue (line-mode, guarded) for intermittent connectivity
+- Offline command queue (line-mode, guarded) for intermittent connectivity — **disabled by default**, requires explicit enable per session, bounded to 10 queued commands, line-mode only (no raw keystrokes), and restricted to sessions in `WaitingInput` state
 - SSH and browser attach coexist on the same session simultaneously
+- Events classified as **durable** (state transitions, transcript chunks, tool calls, usage records — stored in ring buffer, persisted, replayed on `RESUME`) or **ephemeral** (typing indicator, live token counter, active-user presence — broadcast to connected clients but excluded from ring buffer, transcript, and replay)
+
+**Protocol invariants:**
+
+| Invariant | Description |
+|---|---|
+| Monotonic event IDs | Each session has a strictly increasing `event_id` counter. IDs are never reused, even after daemon restart. |
+| At-most-once input | Every `INPUT` message carries a `(client_id, input_id)` pair. The edge applies each pair exactly once and returns `ACK`. On reconnect, the client resends unacked inputs; the edge deduplicates. |
+| Replay bounds | On `RESUME`, the edge replays events from `last_seen_event_id + 1` if available in the ring buffer. If the event has been evicted, the edge sends the latest `SNAPSHOT` followed by events after the snapshot's `event_id`. |
+| Server responsibilities | The edge is the sole writer of `event_id`s and the sole applier of `INPUT` to tmux. The hub relays without modifying IDs or reordering. |
+| Client responsibilities | The client tracks `last_seen_event_id` and sends it on `RESUME`. The client retransmits unacked `INPUT` messages on reconnect with the original `input_id`. |
+
+**Ring buffer persistence.** The ring buffer is memory-only during normal operation. On graceful daemon shutdown (`forged drain`), the current ring buffer contents and the last `event_id` per session are flushed to disk. On restart, the daemon reloads the persisted state so that clients can `RESUME` without falling back to a snapshot. The `event_id` counter is always recovered from disk (or set to the last known value + 1) to maintain the monotonic invariant across restarts.
 
 **Incremental ship order within this phase:**
 
-1. Event IDs + ring buffer on edge (foundation)
-2. `RESUME` handshake (reconnect without losing output)
-3. `INPUT` ack + dedupe (reliable input)
-4. Chunk coalescing + compression (bandwidth)
-5. Periodic snapshots (fast catch-up)
-6. Hub tunnel + store-and-forward (mobile resilience)
-7. Watch/Control modes + adaptive fidelity (mobile UX)
-8. Offline command queue (intermittent connectivity)
+1. Session event protocol schema (shared crate — prerequisite for all below)
+2. Event IDs + ring buffer on edge (foundation)
+3. `RESUME` handshake (reconnect without losing output)
+4. `INPUT` ack + dedupe (reliable input)
+5. Chunk coalescing + compression (bandwidth)
+6. Periodic snapshots (fast catch-up)
+7. Hub tunnel + store-and-forward (mobile resilience)
+8. Watch/Control modes + adaptive fidelity (mobile UX)
+9. Offline command queue (intermittent connectivity — disabled by default)
 
 **Dependencies:** Phase 2.
 
-**Estimated effort:** 5–7 weeks (expanded from 4–6 to account for the reliable stream layer).
+**Estimated effort:** 5–7 weeks (expanded from 4–6 to account for the reliable stream layer). The protocol schema (step 1) should be completed in the first week to unblock parallel work on edge, hub, and dashboard.
 
 ---
 
@@ -296,6 +321,8 @@ template = '{"text": "Session {{session_id}} ({{agent}}) is {{state}}"}'
 - `fmux stop` and `fmux kill` distinguish graceful vs. forced termination
 - Policy violations logged as events
 
+**Platform note:** cgroup v2 and network namespaces are Linux-only. On macOS edge nodes, policy enforcement is best-effort: filesystem scope can be enforced via `sandbox-exec` or directory-level permissions, but CPU/memory/PID limits and network namespaces are not available. macOS hosts should log a warning at startup if policies requiring Linux-only features are configured, and skip enforcement for those policies rather than failing. This keeps macOS viable as a development edge node without blocking the Linux production path.
+
 **Dependencies:** Phase 2.
 
 **Estimated effort:** 3–4 weeks.
@@ -345,7 +372,7 @@ template = '{"text": "Session {{session_id}} ({{agent}}) is {{state}}"}'
 
 **Capabilities:**
 
-- Sidecar tails and parses agent JSONL session logs from disk:
+- Sidecar tails and parses agent JSONL session logs from disk (reusing the same file watcher infrastructure introduced in Phase 0 for state detection):
   - Claude Code: `~/.config/claude/projects/` (v1.0.30+) or `~/.claude/projects/` (legacy)
   - Codex CLI: `~/.codex/sessions/*.jsonl` (token events available from Sept 2025+)
 - Both collectors emit normalised `UsageEvent` records (prompt tokens, completion tokens, cache tokens, cost estimate)
