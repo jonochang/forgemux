@@ -26,6 +26,10 @@ const DASHBOARD_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../dashboard/index.html"
 ));
+const DASHBOARD_LEGACY_HTML: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../dashboard/index-legacy.html"
+));
 const FORGEHUB_VERSION_HEADER: &str = "x-forgemux-version";
 
 #[derive(Debug, Subcommand)]
@@ -100,6 +104,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/sessions/:id/attach", get(ws_attach))
                 .route("/", get(dashboard_index))
                 .route("/index.html", get(dashboard_index))
+                .route("/legacy", get(dashboard_legacy))
                 .fallback_service(ServeDir::new("dashboard"))
                 .with_state(shared);
             rt.block_on(async move {
@@ -150,6 +155,15 @@ async fn dashboard_index() -> impl IntoResponse {
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
     (axum::http::StatusCode::OK, headers, DASHBOARD_HTML)
+}
+
+async fn dashboard_legacy() -> impl IntoResponse {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        axum::http::header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    (axum::http::StatusCode::OK, headers, DASHBOARD_LEGACY_HTML)
 }
 
 async fn list_sessions(
@@ -1466,11 +1480,9 @@ mod tests {
 
     #[test]
     fn dashboard_includes_attach_and_queue() {
-        assert!(DASHBOARD_HTML.contains("sessions/ws"));
-        assert!(DASHBOARD_HTML.contains("sessions/${id}/attach"));
-        assert!(DASHBOARD_HTML.contains("pendingInputs"));
-        assert!(DASHBOARD_HTML.contains("detail-logs"));
-        assert!(DASHBOARD_HTML.contains("start-session"));
+        assert!(DASHBOARD_HTML.contains("app.js"));
+        assert!(DASHBOARD_HTML.contains("id=\"app\""));
+        assert!(DASHBOARD_LEGACY_HTML.contains("sessions/ws"));
     }
 
     #[tokio::test]

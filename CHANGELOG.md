@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.12 - 2026-02-27
+
+- Add Preact+HTM dashboard shell with fleet view.
+- Serve legacy dashboard at `/legacy`.
+
 ## 0.1.11 - 2026-02-27
 
 - Add decision flow endpoints on forged and forward to hub.

@@ -1,0 +1,857 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Forgemux Dashboard</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f6f1ea;
+        --ink: #1e1a15;
+        --accent: #d26a2e;
+        --panel: #fffdf9;
+        --border: #e2d7c9;
+        --terminal: #0f1216;
+        --terminal-ink: #e6e6e6;
+        --muted: #5c5348;
+      }
+      body {
+        margin: 0;
+        font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
+        background: radial-gradient(circle at top, #fff4e6, var(--bg));
+        color: var(--ink);
+      }
+      header {
+        padding: 24px;
+        border-bottom: 1px solid var(--border);
+        background: var(--panel);
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+      }
+      main {
+        padding: 24px;
+        display: grid;
+        gap: 20px;
+        max-width: 1200px;
+        margin: 0 auto;
+        box-sizing: border-box;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+        min-width: 0;
+      }
+      .muted {
+        color: var(--muted);
+      }
+      .small {
+        font-size: 12px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: 1fr 2fr;
+        gap: 20px;
+      }
+      .stack {
+        display: grid;
+        gap: 20px;
+      }
+      @media (max-width: 768px) {
+        .grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      .session-row {
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border);
+        cursor: pointer;
+      }
+      .session-row:last-child {
+        border-bottom: none;
+      }
+      .session-row:hover {
+        background: #faf5ef;
+        margin: 0 -8px;
+        padding: 10px 8px;
+        border-radius: 8px;
+      }
+      .session-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+      }
+      .session-branch {
+        font-weight: 600;
+        font-size: 14px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .session-meta {
+        color: var(--muted);
+        font-size: 12px;
+        margin-top: 2px;
+      }
+      .badge {
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 11px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        background: #fce9d8;
+        color: #8a3a10;
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+      .badge.running {
+        background: #d4edda;
+        color: #155724;
+      }
+      .badge.errored {
+        background: #f8d7da;
+        color: #721c24;
+      }
+      .badge.waiting {
+        background: #cce5ff;
+        color: #004085;
+      }
+      .terminal {
+        background: var(--terminal);
+        color: var(--terminal-ink);
+        border-radius: 12px;
+        padding: 16px;
+        height: 420px;
+        overflow-y: auto;
+        overflow-x: hidden;
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+        font-size: 13px;
+        line-height: 1.4;
+      }
+      .controls {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+        align-items: flex-end;
+      }
+      .controls textarea {
+        flex: 1;
+        padding: 10px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+        font-size: 13px;
+        resize: none;
+        overflow-y: auto;
+        min-height: 20px;
+        max-height: 120px;
+        line-height: 1.4;
+      }
+      @media (max-width: 900px) {
+        header {
+          flex-direction: column;
+          gap: 8px;
+        }
+        main {
+          padding: 16px;
+          grid-template-columns: 1fr;
+        }
+        .sessions {
+          max-height: 50vh;
+        }
+        .terminal {
+          height: 50vh;
+        }
+      }
+      .controls button {
+        padding: 10px 16px;
+        border-radius: 8px;
+        border: none;
+        background: var(--accent);
+        color: #fff;
+        font-weight: 600;
+        cursor: pointer;
+        flex-shrink: 0;
+        align-self: flex-end;
+      }
+      .status {
+        margin-top: 10px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .archive-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 10px 0 6px;
+        cursor: pointer;
+        font-size: 12px;
+        color: var(--muted);
+        user-select: none;
+        border-top: 1px solid var(--border);
+        margin-top: 8px;
+      }
+      .archive-header:hover {
+        color: var(--ink);
+      }
+      .archive-toggle {
+        display: inline-block;
+        transition: transform 0.15s;
+        font-size: 10px;
+      }
+      .archive-toggle.open {
+        transform: rotate(90deg);
+      }
+      .archive-body.collapsed {
+        display: none;
+      }
+      .session-row.archived {
+        opacity: 0.55;
+      }
+      .detail-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+        gap: 10px;
+        margin-top: 12px;
+      }
+      .detail-grid span {
+        font-weight: 600;
+      }
+      .detail-section {
+        margin-top: 16px;
+      }
+      .log-box {
+        background: #14171d;
+        color: #d9d9d9;
+        border-radius: 8px;
+        padding: 12px;
+        font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+        font-size: 12px;
+        max-height: 200px;
+        overflow: auto;
+        white-space: pre-wrap;
+      }
+      .form-row {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        margin-top: 10px;
+      }
+      .form-row input {
+        padding: 8px 10px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 13px;
+      }
+      .form-row label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .form-actions {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-top: 12px;
+      }
+      .form-actions button {
+        border: none;
+        border-radius: 999px;
+        background: var(--accent);
+        color: white;
+        padding: 8px 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .form-actions button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Forgemux</h1>
+      <div class="muted">Live sessions and browser attach</div>
+    </header>
+    <main class="grid">
+      <div class="card">
+        <strong>Sessions</strong>
+        <div class="muted" id="sessions">Loading sessions...</div>
+      </div>
+      <div class="stack">
+        <div class="card">
+          <strong>Attach</strong>
+          <div class="muted" id="attach-help">Select a session to attach.</div>
+          <div class="terminal" id="terminal">Waiting for session...</div>
+          <div class="controls">
+            <textarea
+              id="input"
+              rows="1"
+              placeholder="Send input (Enter to send, Shift+Enter for newline)"
+            ></textarea>
+            <button id="send">Send</button>
+          </div>
+          <div class="status" id="ws-status">WebSocket idle.</div>
+        </div>
+        <div class="card">
+          <strong>Session Details</strong>
+          <div class="muted small" id="detail-meta">Select a session to view details.</div>
+          <div class="detail-grid">
+            <div>State: <span id="detail-state">-</span></div>
+            <div>Agent: <span id="detail-agent">-</span></div>
+            <div>Model: <span id="detail-model">-</span></div>
+            <div>Repo: <span id="detail-repo">-</span></div>
+            <div>Last activity: <span id="detail-activity">-</span></div>
+          </div>
+          <div class="detail-section">
+            <strong>Recent Logs</strong>
+            <div class="log-box" id="detail-logs">No logs loaded.</div>
+          </div>
+          <div class="detail-section">
+            <strong>Usage</strong>
+            <div class="muted small" id="detail-usage">No usage data.</div>
+          </div>
+        </div>
+        <div class="card">
+          <strong>Start Session</strong>
+          <div class="muted small">Launch a new session on the hub.</div>
+          <div class="form-row">
+            <label for="start-agent">Agent</label>
+            <input id="start-agent" placeholder="claude" />
+          </div>
+          <div class="form-row">
+            <label for="start-model">Model</label>
+            <input id="start-model" placeholder="sonnet" />
+          </div>
+          <div class="form-row">
+            <label for="start-repo">Repo</label>
+            <input id="start-repo" placeholder="." />
+          </div>
+          <div class="form-row">
+            <label for="start-branch">Branch (required if worktree)</label>
+            <input id="start-branch" placeholder="feature/my-branch" />
+          </div>
+          <div class="form-row">
+            <label>
+              <input type="checkbox" id="start-worktree" />
+              Create worktree
+            </label>
+          </div>
+          <div class="form-actions">
+            <button id="start-session">Start</button>
+            <div class="muted small" id="start-status">Idle.</div>
+          </div>
+        </div>
+      </div>
+    </main>
+    <script>
+      const sessionsEl = document.getElementById("sessions");
+      const terminalEl = document.getElementById("terminal");
+      const statusEl = document.getElementById("ws-status");
+      const attachHelp = document.getElementById("attach-help");
+      const inputEl = document.getElementById("input");
+      const sendBtn = document.getElementById("send");
+      const detailMetaEl = document.getElementById("detail-meta");
+      const detailStateEl = document.getElementById("detail-state");
+      const detailAgentEl = document.getElementById("detail-agent");
+      const detailModelEl = document.getElementById("detail-model");
+      const detailRepoEl = document.getElementById("detail-repo");
+      const detailActivityEl = document.getElementById("detail-activity");
+      const detailLogsEl = document.getElementById("detail-logs");
+      const detailUsageEl = document.getElementById("detail-usage");
+      const startAgentEl = document.getElementById("start-agent");
+      const startModelEl = document.getElementById("start-model");
+      const startRepoEl = document.getElementById("start-repo");
+      const startBranchEl = document.getElementById("start-branch");
+      const startWorktreeEl = document.getElementById("start-worktree");
+      const startBtn = document.getElementById("start-session");
+      const startStatusEl = document.getElementById("start-status");
+      const authToken = new URLSearchParams(window.location.search).get("token");
+      const authQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+      const authHeader = authToken ? { Authorization: `Bearer ${authToken}` } : {};
+      const cryptoKeyBase64 = new URLSearchParams(window.location.search).get("key");
+      const cryptoKeyPromise = cryptoKeyBase64 ? importKey(cryptoKeyBase64) : null;
+      let attachSocket = null;
+      let currentSessionId = null;
+      let pendingInputs = [];
+      let lastTerminalData = null;
+      let lastSessionsJson = null;
+      let sessionsById = {};
+
+      // --- ANSI color support ---
+      const ANSI_COLORS = [
+        "#000", "#c00", "#0a0", "#c50", "#00c", "#c0c", "#0cc", "#ccc",
+        "#555", "#f55", "#5f5", "#ff5", "#55f", "#f5f", "#5ff", "#fff",
+      ];
+
+      function ansiToHtml(text) {
+        let html = "";
+        let i = 0;
+        let openSpans = 0;
+        while (i < text.length) {
+          if (text[i] === "\x1b" && text[i + 1] === "[") {
+            let j = i + 2;
+            while (j < text.length && text[j] !== "m" && j - i < 20) j++;
+            if (text[j] === "m") {
+              const codes = text
+                .slice(i + 2, j)
+                .split(";")
+                .map((c) => parseInt(c, 10) || 0);
+              const styles = ansiCodesToStyle(codes);
+              if (styles === null) {
+                while (openSpans > 0) {
+                  html += "</span>";
+                  openSpans--;
+                }
+              } else if (styles) {
+                html += `<span style="${styles}">`;
+                openSpans++;
+              }
+              i = j + 1;
+              continue;
+            }
+          }
+          if (text[i] === "&") html += "&amp;";
+          else if (text[i] === "<") html += "&lt;";
+          else if (text[i] === ">") html += "&gt;";
+          else html += text[i];
+          i++;
+        }
+        while (openSpans > 0) {
+          html += "</span>";
+          openSpans--;
+        }
+        return html;
+      }
+
+      function ansiCodesToStyle(codes) {
+        if (codes.length === 1 && codes[0] === 0) return null;
+        let parts = [];
+        for (let ci = 0; ci < codes.length; ci++) {
+          const c = codes[ci];
+          if (c === 0) return null;
+          else if (c === 1) parts.push("font-weight:bold");
+          else if (c === 2) parts.push("opacity:0.7");
+          else if (c === 3) parts.push("font-style:italic");
+          else if (c === 4) parts.push("text-decoration:underline");
+          else if (c === 7) parts.push("filter:invert(1)");
+          else if (c === 9) parts.push("text-decoration:line-through");
+          else if (c >= 30 && c <= 37) parts.push(`color:${ANSI_COLORS[c - 30]}`);
+          else if (c === 38 && codes[ci + 1] === 5) {
+            parts.push(`color:${color256(codes[ci + 2])}`);
+            ci += 2;
+          } else if (c === 38 && codes[ci + 1] === 2) {
+            parts.push(`color:rgb(${codes[ci + 2]},${codes[ci + 3]},${codes[ci + 4]})`);
+            ci += 4;
+          } else if (c >= 40 && c <= 47) parts.push(`background:${ANSI_COLORS[c - 40]}`);
+          else if (c === 48 && codes[ci + 1] === 5) {
+            parts.push(`background:${color256(codes[ci + 2])}`);
+            ci += 2;
+          } else if (c === 48 && codes[ci + 1] === 2) {
+            parts.push(`background:rgb(${codes[ci + 2]},${codes[ci + 3]},${codes[ci + 4]})`);
+            ci += 4;
+          } else if (c >= 90 && c <= 97) parts.push(`color:${ANSI_COLORS[c - 90 + 8]}`);
+          else if (c >= 100 && c <= 107) parts.push(`background:${ANSI_COLORS[c - 100 + 8]}`);
+          else if (c === 39) parts.push("color:inherit");
+          else if (c === 49) parts.push("background:inherit");
+        }
+        return parts.length ? parts.join(";") : "";
+      }
+
+      function color256(n) {
+        if (n == null) return "inherit";
+        if (n < 16) return ANSI_COLORS[n];
+        if (n >= 232) {
+          const g = 8 + (n - 232) * 10;
+          return `rgb(${g},${g},${g})`;
+        }
+        const idx = n - 16;
+        const r = Math.floor(idx / 36);
+        const g = Math.floor((idx % 36) / 6);
+        const b = idx % 6;
+        const map = [0, 95, 135, 175, 215, 255];
+        return `rgb(${map[r]},${map[g]},${map[b]})`;
+      }
+
+      function trimCapture(text) {
+        return text.replace(/^(\s*\n)+/, "").replace(/(\n\s*)+$/, "");
+      }
+
+      // --- Session list ---
+      function branchFromRepo(repoRoot) {
+        if (!repoRoot) return null;
+        const wt = "/worktrees/";
+        const idx = repoRoot.indexOf(wt);
+        if (idx !== -1) return repoRoot.slice(idx + wt.length);
+        const parts = repoRoot.split("/");
+        return parts[parts.length - 1] || repoRoot;
+      }
+
+      function badgeClass(state) {
+        const s = (state || "").toLowerCase();
+        if (s === "running") return "badge running";
+        if (s === "errored") return "badge errored";
+        if (s === "waitinginput") return "badge waiting";
+        return "badge";
+      }
+
+      function timeAgo(dateStr) {
+        if (!dateStr) return "";
+        const diff = (Date.now() - new Date(dateStr).getTime()) / 1000;
+        if (diff < 60) return "just now";
+        if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+        if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+        return `${Math.floor(diff / 86400)}d ago`;
+      }
+
+      function escapeHtml(s) {
+        return s
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      let archiveOpen = false;
+
+      function isArchived(state) {
+        const s = (state || "").toLowerCase();
+        return s === "terminated" || s === "errored";
+      }
+
+      function makeSessionRow(session, archived) {
+        const branch = branchFromRepo(session.repo_root);
+        const row = document.createElement("div");
+        row.className = archived ? "session-row archived" : "session-row";
+        row.innerHTML = `
+          <div class="session-header">
+            <span class="session-branch" title="${escapeHtml(session.repo_root || "")}">${escapeHtml(branch || session.id)}</span>
+            <span class="${badgeClass(session.state)}">${escapeHtml(session.state)}</span>
+          </div>
+          <div class="session-meta">
+            ${escapeHtml(session.id)} &middot; ${escapeHtml(session.agent)} ${escapeHtml(session.model)} &middot; ${timeAgo(session.last_activity_at)}
+          </div>
+        `;
+        row.addEventListener("click", () => selectSession(session));
+        return row;
+      }
+
+      function renderSessions(sessions) {
+        if (!sessions.length) {
+          sessionsEl.textContent = "No sessions found.";
+          return;
+        }
+        sessionsById = {};
+        sessions.forEach((s) => {
+          sessionsById[s.id] = s;
+        });
+        const active = sessions.filter((s) => !isArchived(s.state));
+        const archived = sessions.filter((s) => isArchived(s.state));
+
+        sessionsEl.innerHTML = "";
+
+        if (active.length) {
+          active.forEach((s) => sessionsEl.appendChild(makeSessionRow(s, false)));
+        } else {
+          const msg = document.createElement("div");
+          msg.className = "muted small";
+          msg.style.padding = "10px 0";
+          msg.textContent = "No active sessions.";
+          sessionsEl.appendChild(msg);
+        }
+
+        if (archived.length) {
+          const header = document.createElement("div");
+          header.className = "archive-header";
+          header.innerHTML = `<span class="archive-toggle ${archiveOpen ? "open" : ""}">&#9654;</span> Archived (${archived.length})`;
+          const body = document.createElement("div");
+          body.className = archiveOpen ? "archive-body" : "archive-body collapsed";
+          archived.forEach((s) => body.appendChild(makeSessionRow(s, true)));
+          header.addEventListener("click", () => {
+            archiveOpen = !archiveOpen;
+            body.classList.toggle("collapsed", !archiveOpen);
+            header.querySelector(".archive-toggle").classList.toggle("open", archiveOpen);
+          });
+          sessionsEl.appendChild(header);
+          sessionsEl.appendChild(body);
+        }
+
+        if (currentSessionId && sessionsById[currentSessionId]) {
+          updateDetail(sessionsById[currentSessionId]);
+        }
+      }
+
+      // --- Attach ---
+      function selectSession(session) {
+        currentSessionId = session.id;
+        updateDetail(session);
+        loadLogs(session.id);
+        loadUsage(session.id);
+        attachSession(session.id);
+      }
+
+      function attachSession(id) {
+        lastTerminalData = null;
+        if (attachSocket) {
+          attachSocket.close();
+        }
+        attachHelp.textContent = `Attached to ${id}`;
+        terminalEl.innerHTML = "Connecting...";
+        const protocol = location.protocol === "https:" ? "wss" : "ws";
+        attachSocket = new WebSocket(
+          `${protocol}://${location.host}/sessions/${id}/attach${authQuery}`
+        );
+        attachSocket.addEventListener("open", () => {
+          statusEl.textContent = "Attached. Waiting for data...";
+          attachSocket.send(
+            JSON.stringify({ type: "resume", last_seen_event_id: 0 })
+          );
+          flushPending();
+        });
+        attachSocket.addEventListener("message", async (event) => {
+          try {
+            const payload = JSON.parse(event.data);
+            if (payload.type === "snapshot" || payload.type === "event") {
+              const decoded = payload.encrypted
+                ? await decryptString(payload.data)
+                : payload.data;
+              const trimmed = trimCapture(decoded);
+              if (trimmed !== lastTerminalData) {
+                lastTerminalData = trimmed;
+                terminalEl.innerHTML = ansiToHtml(trimmed);
+                terminalEl.scrollTop = terminalEl.scrollHeight;
+              }
+            }
+            if (payload.type === "ack") {
+              statusEl.textContent = `Input ${payload.input_id} acked`;
+            }
+          } catch (e) {
+            terminalEl.textContent = event.data;
+          }
+        });
+        attachSocket.addEventListener("close", () => {
+          statusEl.textContent = "Attach socket closed.";
+          if (currentSessionId) {
+            setTimeout(() => attachSession(currentSessionId), 1500);
+          }
+        });
+      }
+
+      function updateDetail(session) {
+        if (!session) return;
+        detailMetaEl.textContent = `Session ${session.id}`;
+        detailStateEl.textContent = session.state || "-";
+        detailAgentEl.textContent = session.agent || "-";
+        detailModelEl.textContent = session.model || "-";
+        detailRepoEl.textContent = session.repo_root || "-";
+        detailActivityEl.textContent = session.last_activity_at
+          ? new Date(session.last_activity_at).toLocaleString()
+          : "-";
+      }
+
+      async function loadLogs(id) {
+        detailLogsEl.textContent = "Loading logs...";
+        try {
+          const resp = await fetch(`/sessions/${encodeURIComponent(id)}/logs`, {
+            headers: authHeader,
+          });
+          if (!resp.ok) throw new Error("log fetch failed");
+          const data = await resp.json();
+          detailLogsEl.textContent = data.content || "No logs available.";
+        } catch (err) {
+          detailLogsEl.textContent = "Failed to load logs.";
+        }
+      }
+
+      async function loadUsage(id) {
+        detailUsageEl.textContent = "Loading usage...";
+        try {
+          const resp = await fetch(`/sessions/${encodeURIComponent(id)}/usage`, {
+            headers: authHeader,
+          });
+          if (!resp.ok) throw new Error("usage fetch failed");
+          const data = await resp.json();
+          const cost =
+            typeof data.estimated_cost_usd === "number"
+              ? `$${data.estimated_cost_usd.toFixed(4)}`
+              : "-";
+          detailUsageEl.textContent = `Prompt ${data.prompt_tokens} · Completion ${data.completion_tokens} · Total ${data.total_tokens} · ${cost}`;
+        } catch (err) {
+          detailUsageEl.textContent = "Failed to load usage.";
+        }
+      }
+
+      // --- Input handling ---
+      async function sendInput() {
+        const value = inputEl.value;
+        if (!value) return;
+        const inputId = Math.random().toString(36).slice(2);
+        const payloadData = cryptoKeyPromise
+          ? await encryptString(value + "\n")
+          : value + "\n";
+        const payload = JSON.stringify({
+          type: "input",
+          input_id: inputId,
+          data: payloadData,
+          encrypted: Boolean(cryptoKeyPromise),
+        });
+        if (!attachSocket || attachSocket.readyState !== WebSocket.OPEN) {
+          pendingInputs.push(payload);
+          statusEl.textContent = `Queued ${inputId} (offline)`;
+        } else {
+          attachSocket.send(payload);
+          statusEl.textContent = `Sent ${inputId}`;
+        }
+        inputEl.value = "";
+        inputEl.style.height = "auto";
+      }
+
+      sendBtn.addEventListener("click", sendInput);
+
+      inputEl.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendInput();
+        }
+      });
+
+      inputEl.addEventListener("input", () => {
+        inputEl.style.height = "auto";
+        inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + "px";
+      });
+
+      function flushPending() {
+        if (!attachSocket || attachSocket.readyState !== WebSocket.OPEN) return;
+        if (!pendingInputs.length) return;
+        pendingInputs.forEach((payload) => attachSocket.send(payload));
+        pendingInputs = [];
+        statusEl.textContent = "Sent queued inputs.";
+      }
+
+      // --- Sessions WebSocket ---
+      function connectSessionsSocket() {
+        const protocol = location.protocol === "https:" ? "wss" : "ws";
+        const ws = new WebSocket(
+          `${protocol}://${location.host}/sessions/ws${authQuery}`
+        );
+        ws.addEventListener("message", (event) => {
+          try {
+            if (event.data === lastSessionsJson) return;
+            lastSessionsJson = event.data;
+            const sessions = JSON.parse(event.data);
+            renderSessions(sessions);
+          } catch (e) {
+            sessionsEl.textContent = "Failed to parse sessions.";
+          }
+        });
+        ws.addEventListener("close", () => {
+          setTimeout(connectSessionsSocket, 2000);
+        });
+      }
+
+      connectSessionsSocket();
+
+      async function startSession() {
+        startBtn.disabled = true;
+        startStatusEl.textContent = "Starting...";
+        const payload = {
+          agent: startAgentEl.value || "claude",
+          model: startModelEl.value || "sonnet",
+          repo: startRepoEl.value || ".",
+        };
+        if (startWorktreeEl.checked) {
+          if (!startBranchEl.value) {
+            startStatusEl.textContent = "Branch required for worktree.";
+            startBtn.disabled = false;
+            return;
+          }
+          payload.worktree = true;
+          payload.branch = startBranchEl.value || "";
+        }
+        try {
+          const resp = await fetch("/sessions", {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              ...authHeader,
+            },
+            body: JSON.stringify(payload),
+          });
+          const data = await resp.json();
+          if (!resp.ok) {
+            throw new Error(data.error || "start failed");
+          }
+          startStatusEl.textContent = `Started ${data.session_id || "session"}`;
+          if (data.session_id) {
+            startRepoEl.value = payload.repo;
+            startBranchEl.value = payload.branch || "";
+          }
+        } catch (err) {
+          startStatusEl.textContent = err.message;
+        } finally {
+          startBtn.disabled = false;
+        }
+      }
+
+      startBtn.addEventListener("click", startSession);
+
+      function base64ToBytes(base64) {
+        const bin = atob(base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) {
+          bytes[i] = bin.charCodeAt(i);
+        }
+        return bytes;
+      }
+
+      function bytesToBase64(bytes) {
+        let bin = "";
+        bytes.forEach((b) => {
+          bin += String.fromCharCode(b);
+        });
+        return btoa(bin);
+      }
+
+      async function importKey(base64) {
+        const raw = base64ToBytes(base64);
+        return crypto.subtle.importKey("raw", raw, "AES-GCM", false, [
+          "encrypt",
+          "decrypt",
+        ]);
+      }
+
+      async function encryptString(value) {
+        const key = await cryptoKeyPromise;
+        if (!key) return value;
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const data = new TextEncoder().encode(value);
+        const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
+        const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+        combined.set(iv, 0);
+        combined.set(new Uint8Array(ciphertext), iv.length);
+        return bytesToBase64(combined);
+      }
+
+      async function decryptString(value) {
+        const key = await cryptoKeyPromise;
+        if (!key) return value;
+        const data = base64ToBytes(value);
+        if (data.length < 13) return "";
+        const iv = data.slice(0, 12);
+        const ciphertext = data.slice(12);
+        const plaintext = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          key,
+          ciphertext
+        );
+        return new TextDecoder().decode(plaintext);
+      }
+    </script>
+  </body>
+</html>
