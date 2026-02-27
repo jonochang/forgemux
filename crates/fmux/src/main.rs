@@ -5,7 +5,7 @@ use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -99,6 +99,7 @@ enum Command {
     Usage {
         session_id: String,
     },
+    Doctor,
     Version,
 }
 
@@ -626,6 +627,26 @@ fn main() {
                 }
             }
         }
+        Command::Doctor => {
+            let config_path = expand_tilde(&cli.config);
+            if let Err(err) = load_cli_config(&cli.config) {
+                eprintln!("config: error ({})", err);
+                std::process::exit(1);
+            }
+            let report = doctor_report(
+                &config_path,
+                resolve_hub(cli.hub.as_deref(), &cli_config),
+                resolve_edge(cli.edge.as_deref(), cli.hub.as_deref(), &cli_config),
+                resolve_token(cli.token.as_deref(), &cli_config),
+                check_health,
+            );
+            for line in report.lines() {
+                println!("{line}");
+            }
+            if !report.ok() {
+                std::process::exit(1);
+            }
+        }
         Command::Version => {
             println!("fmux 0.1.0");
         }
@@ -714,6 +735,82 @@ fn expand_tilde(path: &str) -> PathBuf {
     PathBuf::from(path)
 }
 
+struct DoctorReport {
+    config_present: bool,
+    hub_url: Option<String>,
+    hub_ok: Option<bool>,
+    edge_url: String,
+    edge_ok: bool,
+    token_present: bool,
+}
+
+impl DoctorReport {
+    fn ok(&self) -> bool {
+        let hub_ok = self.hub_ok.unwrap_or(true);
+        self.edge_ok && hub_ok
+    }
+
+    fn lines(&self) -> Vec<String> {
+        let mut lines = Vec::new();
+        let config_status = if self.config_present { "ok" } else { "missing" };
+        lines.push(format!("config: {config_status}"));
+        if let Some(hub_url) = &self.hub_url {
+            let status = if self.hub_ok.unwrap_or(false) {
+                "ok"
+            } else {
+                "unreachable"
+            };
+            lines.push(format!("hub: {status} ({hub_url})"));
+        } else {
+            lines.push("hub: not configured".to_string());
+        }
+        let edge_status = if self.edge_ok { "ok" } else { "unreachable" };
+        lines.push(format!("edge: {edge_status} ({})", self.edge_url));
+        let token_status = if self.token_present {
+            "present"
+        } else {
+            "missing"
+        };
+        lines.push(format!("token: {token_status}"));
+        lines
+    }
+}
+
+fn doctor_report(
+    config_path: &Path,
+    hub_url: Option<String>,
+    edge_url: String,
+    token: Option<String>,
+    health_check: impl Fn(&str, Option<&str>) -> bool,
+) -> DoctorReport {
+    let hub_ok = hub_url
+        .as_deref()
+        .map(|url| health_check(url, token.as_deref()));
+    let edge_ok = health_check(&edge_url, token.as_deref());
+    DoctorReport {
+        config_present: config_path.exists(),
+        hub_url,
+        hub_ok,
+        edge_url,
+        edge_ok,
+        token_present: token.is_some(),
+    }
+}
+
+fn check_health(url: &str, token: Option<&str>) -> bool {
+    let client = reqwest::blocking::Client::new();
+    let url = format!("{}/health", url.trim_end_matches('/'));
+    let req = match token {
+        Some(token) => client
+            .get(url)
+            .header("Authorization", format!("Bearer {}", token)),
+        None => client.get(url),
+    };
+    req.send()
+        .map(|resp| resp.status().is_success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +885,38 @@ mel-01 = "edge-mel-01.tailnet:9443"
         };
         let path = expand_tilde("~/.config/forgemux/config.toml");
         assert!(path.starts_with(PathBuf::from(home)));
+    }
+
+    #[test]
+    fn doctor_report_marks_unreachable_hub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "hub_url = \"http://hub\"").unwrap();
+        let report = doctor_report(
+            &config_path,
+            Some("http://hub".to_string()),
+            "http://edge".to_string(),
+            None,
+            |url, _| url.contains("edge"),
+        );
+        assert_eq!(report.hub_ok, Some(false));
+        assert!(!report.ok());
+    }
+
+    #[test]
+    fn doctor_report_allows_missing_hub() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.toml");
+        std::fs::write(&config_path, "token = \"abc\"").unwrap();
+        let report = doctor_report(
+            &config_path,
+            None,
+            "http://edge".to_string(),
+            Some("abc".to_string()),
+            |_, _| true,
+        );
+        assert!(report.ok());
+        assert_eq!(report.hub_ok, None);
+        assert!(report.token_present);
     }
 }
