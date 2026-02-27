@@ -1044,6 +1044,15 @@ impl<R: CommandRunner> SessionService<R> {
                 );
             }
         }
+        self.log_event(
+            id,
+            serde_json::json!({
+                "ts": Utc::now(),
+                "type": "user-input",
+                "session_id": id.as_str(),
+                "bytes": input.len(),
+            }),
+        );
         Ok(())
     }
 
@@ -2049,6 +2058,25 @@ mod tests {
                 .iter()
                 .any(|call| call.contains(&"send-keys".to_string()))
         );
+    }
+
+    #[test]
+    fn send_keys_logs_input_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let id = forgemux_core::SessionId::from("S-INPUT1");
+        service.send_keys(&id, "ls\n").unwrap();
+
+        let path = tmp
+            .path()
+            .join("events")
+            .join(format!("{}.jsonl", id.as_str()));
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("\"type\":\"user-input\""));
+        assert!(content.contains("\"bytes\":3"));
     }
 
     #[test]
