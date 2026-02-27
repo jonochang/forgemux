@@ -3,16 +3,22 @@ use forgemux_core::SessionId;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 
+pub const STREAM_PROTOCOL_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamMessage {
     Resume {
         last_seen_event_id: Option<u64>,
         mode: Option<String>,
+        #[serde(default)]
+        protocol_version: Option<u32>,
     },
     Event {
         event_id: u64,
         data: String,
+        #[serde(default = "default_true")]
+        durable: bool,
     },
     Input {
         input_id: String,
@@ -25,6 +31,10 @@ pub enum StreamMessage {
         snapshot_id: u64,
         data: String,
     },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -204,5 +214,27 @@ mod tests {
         let events = manager.events_since(&session, 0);
         assert_eq!(events.len(), 2);
         assert_eq!(manager.latest_event_id(&session), events[1].id);
+    }
+
+    #[test]
+    fn event_defaults_to_durable_on_deserialize() {
+        let json = r#"{"type":"event","event_id":1,"data":"hi"}"#;
+        let msg: StreamMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            StreamMessage::Event { durable, .. } => assert!(durable),
+            _ => panic!("expected event"),
+        }
+    }
+
+    #[test]
+    fn resume_accepts_missing_protocol_version() {
+        let json = r#"{"type":"resume","last_seen_event_id":2,"mode":"watch"}"#;
+        let msg: StreamMessage = serde_json::from_str(json).unwrap();
+        match msg {
+            StreamMessage::Resume {
+                protocol_version, ..
+            } => assert_eq!(protocol_version, None),
+            _ => panic!("expected resume"),
+        }
     }
 }

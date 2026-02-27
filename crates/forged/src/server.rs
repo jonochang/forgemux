@@ -1,4 +1,7 @@
-use crate::{CommandRunner, SessionService, WorktreeSpec, stream::StreamMessage};
+use crate::{
+    CommandRunner, SessionService, WorktreeSpec,
+    stream::{STREAM_PROTOCOL_VERSION, StreamMessage},
+};
 use axum::{
     Json, Router,
     extract::{
@@ -353,8 +356,15 @@ async fn handle_ws<R: CommandRunner + 'static>(
         && let Ok(StreamMessage::Resume {
             last_seen_event_id,
             mode,
+            protocol_version,
         }) = serde_json::from_str::<StreamMessage>(&text)
     {
+        if let Some(version) = protocol_version
+            && !protocol_supported(version)
+        {
+            let _ = socket.send(Message::Close(None)).await;
+            return;
+        }
         last_seen = last_seen_event_id.unwrap_or(0);
         if let Some(mode) = mode {
             control_mode = mode != "watch";
@@ -377,6 +387,7 @@ async fn handle_ws<R: CommandRunner + 'static>(
         let payload = StreamMessage::Event {
             event_id: event.id,
             data: event.data,
+            durable: true,
         };
         if socket
             .send(Message::Text(serde_json::to_string(&payload).unwrap()))
@@ -427,7 +438,11 @@ async fn handle_ws<R: CommandRunner + 'static>(
                     && snapshot != last_snapshot
                 {
                     let event = manager.push_event(&session_id, snapshot.clone());
-                    let payload = StreamMessage::Event { event_id: event.id, data: event.data };
+                    let payload = StreamMessage::Event {
+                        event_id: event.id,
+                        data: event.data,
+                        durable: true,
+                    };
                     if socket.send(Message::Text(serde_json::to_string(&payload).unwrap())).await.is_err() {
                         break;
                     }
@@ -445,6 +460,10 @@ async fn handle_ws<R: CommandRunner + 'static>(
             }
         }
     }
+}
+
+fn protocol_supported(version: u32) -> bool {
+    version == STREAM_PROTOCOL_VERSION
 }
 
 #[cfg(test)]
