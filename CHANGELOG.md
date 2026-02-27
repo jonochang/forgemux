@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.7 - 2026-02-27
+
+- Add hub pairing flow and dashboard token-based auth.
+- Add stream protocol version checks between fmux/forged/forgehub.
+- Add optimistic concurrency to session records.
+- Add optional stream encryption support.
+- Add dashboard session detail view (logs/usage) and start-session form.
+
 ## 0.1.6 - 2026-02-27
 
 - Add agent log watching to improve WaitingInput detection.
