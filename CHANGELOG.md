@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.9 - 2026-02-27
+
+- Add decision queue data model, hub CRUD, and websocket events.
+- Add hub decision endpoints and default workspace seeding for decisions.
+- Add decision types to forgemux-core.
+
 ## 0.1.8 - 2026-02-27
 
 - Split forgemux-core into modules and add `Unreachable` session state.

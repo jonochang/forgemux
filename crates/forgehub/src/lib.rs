@@ -1,15 +1,23 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
-use forgemux_core::{SessionRecord, SessionStore, sort_sessions};
+use forgemux_core::{
+    Decision, DecisionAction, DecisionResolution, SessionRecord, SessionStore, sort_sessions,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::sync::broadcast;
 
 mod db;
-use db::init_db;
+use db::{
+    decision_count, ensure_workspace, get_decision, init_db, insert_decision, list_decisions,
+    log_budget_action, resolve_decision,
+};
+
+pub use db::DecisionStatus;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HubEdge {
@@ -48,6 +56,8 @@ pub struct HubService {
     round_robin: Arc<Mutex<usize>>,
     pairing_tokens: Arc<Mutex<HashMap<String, PairingToken>>>,
     issued_tokens: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
+    decision_tx: broadcast::Sender<DecisionEvent>,
+    decision_counter: Arc<Mutex<u64>>,
     #[allow(dead_code)]
     db: SqlitePool,
 }
@@ -55,12 +65,16 @@ pub struct HubService {
 impl HubService {
     pub async fn new(config: HubConfig) -> anyhow::Result<Self> {
         let db = init_db(&config.data_dir).await?;
+        let (decision_tx, _) = broadcast::channel(100);
+        let counter = decision_count(&db).await?;
         Ok(Self {
             config,
             registry: Arc::new(Mutex::new(HashMap::new())),
             round_robin: Arc::new(Mutex::new(0)),
             pairing_tokens: Arc::new(Mutex::new(HashMap::new())),
             issued_tokens: Arc::new(Mutex::new(HashMap::new())),
+            decision_tx,
+            decision_counter: Arc::new(Mutex::new(counter)),
             db,
         })
     }
@@ -204,6 +218,84 @@ impl HubService {
         }
         Ok(sort_sessions(sessions))
     }
+
+    pub fn subscribe_decisions(&self) -> broadcast::Receiver<DecisionEvent> {
+        self.decision_tx.subscribe()
+    }
+
+    pub async fn list_decisions(
+        &self,
+        workspace_id: &str,
+        repo_id: Option<&str>,
+        status: Option<DecisionStatus>,
+    ) -> anyhow::Result<Vec<Decision>> {
+        list_decisions(&self.db, workspace_id, repo_id, status).await
+    }
+
+    pub async fn get_decision(&self, id: &str) -> anyhow::Result<Option<Decision>> {
+        get_decision(&self.db, id).await
+    }
+
+    pub async fn create_decision(&self, mut decision: Decision) -> anyhow::Result<Decision> {
+        if decision.id.is_empty() {
+            decision.id = self.next_decision_id();
+        }
+        decision.created_at = Utc::now();
+        decision.resolved_at = None;
+        decision.resolution = None;
+        ensure_workspace(&self.db, &decision.workspace_id).await?;
+        insert_decision(&self.db, &decision).await?;
+        let _ = self
+            .decision_tx
+            .send(DecisionEvent::Created(Box::new(decision.clone())));
+        Ok(decision)
+    }
+
+    pub async fn resolve_decision(
+        &self,
+        decision_id: &str,
+        action: DecisionAction,
+        reviewer: &str,
+        comment: Option<String>,
+    ) -> anyhow::Result<()> {
+        let resolution = DecisionResolution {
+            action,
+            reviewer: reviewer.to_string(),
+            comment,
+            resolved_at: Utc::now(),
+        };
+        resolve_decision(&self.db, decision_id, &resolution).await?;
+        if let Some(decision) = get_decision(&self.db, decision_id).await? {
+            log_budget_action(
+                &self.db,
+                &decision.workspace_id,
+                &decision.id,
+                reviewer,
+                action,
+            )
+            .await?;
+        }
+        let _ = self.decision_tx.send(DecisionEvent::Resolved {
+            decision_id: decision_id.to_string(),
+            action,
+        });
+        Ok(())
+    }
+
+    fn next_decision_id(&self) -> String {
+        let mut guard = self.decision_counter.lock().unwrap();
+        *guard += 1;
+        format!("D-{:04}", *guard)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum DecisionEvent {
+    Created(Box<Decision>),
+    Resolved {
+        decision_id: String,
+        action: DecisionAction,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

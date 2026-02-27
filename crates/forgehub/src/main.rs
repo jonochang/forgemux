@@ -8,13 +8,17 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use chrono::Utc;
 use clap::{Parser, Subcommand};
-use forgehub::{EdgeRegistration, HubConfig, HubService};
+use forgehub::{DecisionEvent, DecisionStatus, EdgeRegistration, HubConfig, HubService};
+use forgemux_core::{Decision, DecisionAction, DecisionContext, Severity};
 use futures_util::{SinkExt, StreamExt, future::join_all};
+use serde::Deserialize;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tower_http::services::ServeDir;
 
@@ -74,6 +78,12 @@ fn main() -> anyhow::Result<()> {
                 .route("/health", get(health))
                 .route("/metrics", get(metrics))
                 .route("/sessions", get(list_sessions).post(start_session))
+                .route("/decisions", get(list_decisions).post(create_decision))
+                .route("/decisions/ws", get(ws_decisions))
+                .route("/decisions/:id", get(get_decision))
+                .route("/decisions/:id/approve", post(decision_approve))
+                .route("/decisions/:id/deny", post(decision_deny))
+                .route("/decisions/:id/comment", post(decision_comment))
                 .route("/sessions/ws", get(ws_sessions))
                 .route("/sessions/:id/stop", post(stop_session))
                 .route("/sessions/:id/logs", get(session_logs))
@@ -157,6 +167,296 @@ async fn list_sessions(
         Json(fetch_sessions(&service).await),
     )
         .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+struct DecisionQuery {
+    workspace_id: String,
+    repo_id: Option<String>,
+    status: Option<String>,
+    token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateDecisionRequest {
+    session_id: String,
+    workspace_id: String,
+    repo_id: String,
+    question: String,
+    context: DecisionContext,
+    severity: Severity,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    impact_repo_ids: Vec<String>,
+    assigned_to: Option<String>,
+    agent_goal: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DecisionActionRequest {
+    reviewer: String,
+    comment: Option<String>,
+}
+
+async fn list_decisions(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Query(query): Query<DecisionQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, query.token.as_deref()) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let status = match query.status.as_deref() {
+        None => None,
+        Some("pending") => Some(DecisionStatus::Pending),
+        Some("resolved") => Some(DecisionStatus::Resolved),
+        Some(_) => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "invalid status" })),
+            )
+                .into_response();
+        }
+    };
+    match service
+        .list_decisions(&query.workspace_id, query.repo_id.as_deref(), status)
+        .await
+    {
+        Ok(decisions) => (axum::http::StatusCode::OK, Json(decisions)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_decision(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<AuthQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, query.token.as_deref()) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service.get_decision(&id).await {
+        Ok(Some(decision)) => (axum::http::StatusCode::OK, Json(decision)).into_response(),
+        Ok(None) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "not found" })),
+        )
+            .into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn create_decision(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Json(req): Json<CreateDecisionRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let decision = Decision {
+        id: String::new(),
+        session_id: req.session_id,
+        workspace_id: req.workspace_id,
+        repo_id: req.repo_id,
+        question: req.question,
+        context: req.context,
+        severity: req.severity,
+        tags: req.tags,
+        impact_repo_ids: req.impact_repo_ids,
+        assigned_to: req.assigned_to,
+        agent_goal: req.agent_goal,
+        created_at: Utc::now(),
+        resolved_at: None,
+        resolution: None,
+    };
+    match service.create_decision(decision).await {
+        Ok(created) => (axum::http::StatusCode::OK, Json(created)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn decision_approve(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<DecisionActionRequest>,
+) -> axum::response::Response {
+    decision_action(service, headers, id, DecisionAction::Approve, req).await
+}
+
+async fn decision_deny(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<DecisionActionRequest>,
+) -> axum::response::Response {
+    decision_action(service, headers, id, DecisionAction::Deny, req).await
+}
+
+async fn decision_comment(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<DecisionActionRequest>,
+) -> axum::response::Response {
+    if req.comment.as_deref().unwrap_or("").is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "comment required" })),
+        )
+            .into_response();
+    }
+    decision_action(service, headers, id, DecisionAction::Comment, req).await
+}
+
+async fn decision_action(
+    service: Arc<HubService>,
+    headers: HeaderMap,
+    decision_id: String,
+    action: DecisionAction,
+    req: DecisionActionRequest,
+) -> axum::response::Response {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service
+        .resolve_decision(&decision_id, action, &req.reviewer, req.comment)
+        .await
+    {
+        Ok(()) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "decision_id": decision_id,
+                "action": format!("{action:?}").to_lowercase(),
+                "session_unblocked": action != DecisionAction::Comment,
+            })),
+        )
+            .into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DecisionsWsQuery {
+    workspace_id: String,
+    token: Option<String>,
+}
+
+async fn ws_decisions(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Query(query): Query<DecisionsWsQuery>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, query.token.as_deref()) {
+        return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
+    }
+    ws.on_upgrade(move |socket| decisions_socket(service, query.workspace_id, socket))
+}
+
+async fn decisions_socket(service: Arc<HubService>, workspace_id: String, mut socket: WebSocket) {
+    let pending = service
+        .list_decisions(&workspace_id, None, Some(DecisionStatus::Pending))
+        .await
+        .unwrap_or_default();
+    let init = serde_json::json!({ "type": "decisions_init", "decisions": pending });
+    if socket.send(Message::Text(init.to_string())).await.is_err() {
+        return;
+    }
+
+    let mut rx = service.subscribe_decisions();
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let payload = match &event {
+                    DecisionEvent::Created(decision) => {
+                        if decision.workspace_id != workspace_id {
+                            continue;
+                        }
+                        serde_json::json!({
+                            "type": "decision_created",
+                            "decision": decision,
+                        })
+                    }
+                    DecisionEvent::Resolved {
+                        decision_id,
+                        action,
+                    } => {
+                        let decision = service.get_decision(decision_id).await.ok().flatten();
+                        if let Some(decision) = decision
+                            && decision.workspace_id != workspace_id
+                        {
+                            continue;
+                        }
+                        serde_json::json!({
+                            "type": "decision_resolved",
+                            "decision_id": decision_id,
+                            "action": format!("{action:?}").to_lowercase(),
+                        })
+                    }
+                };
+                if socket
+                    .send(Message::Text(payload.to_string()))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Closed) => break,
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+        }
+    }
 }
 
 async fn metrics(State(service): State<Arc<HubService>>, headers: HeaderMap) -> impl IntoResponse {
@@ -909,6 +1209,97 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/edges")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn decision_roundtrip_endpoints() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
+        let app = Router::new()
+            .route("/decisions", get(list_decisions).post(create_decision))
+            .route("/decisions/:id/approve", post(decision_approve))
+            .with_state(service);
+
+        let payload = serde_json::json!({
+            "session_id": "S-1234abcd",
+            "workspace_id": "ws-1",
+            "repo_id": "repo-1",
+            "question": "Ship the change?",
+            "context": { "type": "log", "text": "diff summary" },
+            "severity": "high",
+            "tags": ["release"],
+            "impact_repo_ids": ["repo-2"],
+            "assigned_to": null,
+            "agent_goal": "Ship release"
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/decisions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let decision_id = created
+            .get("id")
+            .and_then(|value| value.as_str())
+            .unwrap()
+            .to_string();
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/decisions?workspace_id=ws-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let approve = serde_json::json!({ "reviewer": "jono", "comment": "ok" });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/decisions/{}/approve", decision_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(approve.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/decisions?workspace_id=ws-1&status=resolved")
                     .body(Body::empty())
                     .unwrap(),
             )

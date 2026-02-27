@@ -299,7 +299,7 @@ fmux inject <session-id> <command> [OPTIONS]
     Logged as a lifecycle event. Requires operator role or Foreman actor.
 
 fmux version
-    Prints: fmux 0.1.8 (abc1234 2026-02-25) forgemux-proto v1
+    Prints: fmux 0.1.9 (abc1234 2026-02-25) forgemux-proto v1
 ```
 
 When `--edge` is omitted, all commands route through the hub. When `--edge` is provided, the CLI connects directly to that `forged` instance.
@@ -387,7 +387,7 @@ forged health
                    "uptime": "2d 4h", "cpu": "12%", "memory": "1.2G/4G" }
 
 forged version
-    Prints: forged 0.1.8 (abc1234 2026-02-25) forgemux-proto v1
+    Prints: forged 0.1.9 (abc1234 2026-02-25) forgemux-proto v1
 ```
 
 ```mermaid
@@ -553,7 +553,7 @@ forgehub token create <label> [OPTIONS]
     Prints: fmux_tok_a1b2c3d4e5f6...  (shown once, not stored in plaintext)
 
 forgehub version
-    Prints: forgehub 0.1.8 (abc1234 2026-02-25) forgemux-proto v1
+    Prints: forgehub 0.1.9 (abc1234 2026-02-25) forgemux-proto v1
 ```
 
 ```mermaid
