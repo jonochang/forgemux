@@ -19,6 +19,9 @@ axum = { version = "0.7", features = ["json", "ws"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
 walkdir = "2.5"
+aes-gcm = "0.10"
+base64 = "0.22"
+rand = "0.8"
 
 [dev-dependencies]
 tempfile.workspace = true

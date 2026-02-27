@@ -2,6 +2,8 @@ use crate::{
     CommandRunner, SessionService, WorktreeSpec,
     stream::{STREAM_PROTOCOL_VERSION, StreamMessage},
 };
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use axum::{
     Json, Router,
     extract::{
@@ -13,7 +15,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use base64::Engine;
 use forgemux_core::AgentType;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -438,6 +442,49 @@ fn version_compatible(client: &str) -> bool {
     client_major == server_major
 }
 
+#[derive(Clone)]
+struct StreamCrypto {
+    cipher: Aes256Gcm,
+}
+
+impl StreamCrypto {
+    fn from_key(key_b64: Option<&str>) -> Option<Self> {
+        let key_b64 = key_b64?;
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(key_b64)
+            .ok()?;
+        if raw.len() != 32 {
+            return None;
+        }
+        let cipher = Aes256Gcm::new_from_slice(&raw).ok()?;
+        Some(Self { cipher })
+    }
+
+    fn encrypt(&self, plaintext: &str) -> Option<String> {
+        let mut nonce_bytes = [0u8; 12];
+        rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+        let ciphertext = self.cipher.encrypt(nonce, plaintext.as_bytes()).ok()?;
+        let mut out = Vec::with_capacity(nonce_bytes.len() + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Some(base64::engine::general_purpose::STANDARD.encode(out))
+    }
+
+    fn decrypt(&self, data: &str) -> Option<String> {
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .ok()?;
+        if raw.len() < 12 {
+            return None;
+        }
+        let (nonce_bytes, ciphertext) = raw.split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+        let plaintext = self.cipher.decrypt(nonce, ciphertext).ok()?;
+        String::from_utf8(plaintext).ok()
+    }
+}
+
 async fn handle_ws<R: CommandRunner + 'static>(
     service: Arc<SessionService<R>>,
     id: String,
@@ -445,6 +492,7 @@ async fn handle_ws<R: CommandRunner + 'static>(
 ) {
     let session_id = forgemux_core::SessionId::from(id.as_str());
     let manager = service.stream_manager();
+    let crypto = StreamCrypto::from_key(service.config().stream_encryption_key.as_deref());
     let mut last_snapshot = String::new();
     let mut last_seen = 0u64;
     let mut control_mode = true;
@@ -472,9 +520,17 @@ async fn handle_ws<R: CommandRunner + 'static>(
 
     if let Ok(snapshot) = service.capture_output(&session_id, service.config().snapshot_lines) {
         let snapshot_id = manager.latest_event_id(&session_id);
+        let (data, encrypted) = match &crypto {
+            Some(crypto) => crypto
+                .encrypt(&snapshot)
+                .map(|data| (data, true))
+                .unwrap_or_else(|| (snapshot.clone(), false)),
+            None => (snapshot.clone(), false),
+        };
         let payload = StreamMessage::Snapshot {
             snapshot_id,
-            data: snapshot.clone(),
+            data,
+            encrypted,
         };
         let _ = socket
             .send(Message::Text(serde_json::to_string(&payload).unwrap()))
@@ -483,10 +539,18 @@ async fn handle_ws<R: CommandRunner + 'static>(
     }
 
     for event in manager.events_since(&session_id, last_seen) {
+        let (data, encrypted) = match &crypto {
+            Some(crypto) => crypto
+                .encrypt(&event.data)
+                .map(|data| (data, true))
+                .unwrap_or_else(|| (event.data.clone(), false)),
+            None => (event.data.clone(), false),
+        };
         let payload = StreamMessage::Event {
             event_id: event.id,
-            data: event.data,
+            data,
             durable: event.durable,
+            encrypted,
         };
         if socket
             .send(Message::Text(serde_json::to_string(&payload).unwrap()))
@@ -506,11 +570,22 @@ async fn handle_ws<R: CommandRunner + 'static>(
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        if let Ok(StreamMessage::Input { input_id, data }) =
-                            serde_json::from_str::<StreamMessage>(&text)
+                        if let Ok(StreamMessage::Input {
+                            input_id,
+                            data,
+                            encrypted,
+                        }) = serde_json::from_str::<StreamMessage>(&text)
                         {
-                            if control_mode && manager.accept_input(&session_id, &input_id) {
-                                let _ = service.send_keys(&session_id, &data);
+                            let payload = if encrypted {
+                                crypto.as_ref().and_then(|crypto| crypto.decrypt(&data))
+                            } else {
+                                Some(data)
+                            };
+                            if let Some(payload) = payload
+                                && control_mode
+                                && manager.accept_input(&session_id, &input_id)
+                            {
+                                let _ = service.send_keys(&session_id, &payload);
                             }
                             let ack = StreamMessage::Ack { input_id };
                             let _ = socket.send(Message::Text(serde_json::to_string(&ack).unwrap())).await;
@@ -518,11 +593,22 @@ async fn handle_ws<R: CommandRunner + 'static>(
                     }
                     Some(Ok(Message::Binary(bytes))) => {
                         if let Ok(text) = String::from_utf8(bytes)
-                            && let Ok(StreamMessage::Input { input_id, data }) =
-                                serde_json::from_str::<StreamMessage>(&text)
+                            && let Ok(StreamMessage::Input {
+                                input_id,
+                                data,
+                                encrypted,
+                            }) = serde_json::from_str::<StreamMessage>(&text)
                         {
-                            if control_mode && manager.accept_input(&session_id, &input_id) {
-                                let _ = service.send_keys(&session_id, &data);
+                            let payload = if encrypted {
+                                crypto.as_ref().and_then(|crypto| crypto.decrypt(&data))
+                            } else {
+                                Some(data)
+                            };
+                            if let Some(payload) = payload
+                                && control_mode
+                                && manager.accept_input(&session_id, &input_id)
+                            {
+                                let _ = service.send_keys(&session_id, &payload);
                             }
                             let ack = StreamMessage::Ack { input_id };
                             let _ = socket.send(Message::Text(serde_json::to_string(&ack).unwrap())).await;
@@ -537,10 +623,18 @@ async fn handle_ws<R: CommandRunner + 'static>(
                     && snapshot != last_snapshot
                 {
                     let event = manager.push_event(&session_id, snapshot.clone(), true);
+                    let (data, encrypted) = match &crypto {
+                        Some(crypto) => crypto
+                            .encrypt(&event.data)
+                            .map(|data| (data, true))
+                            .unwrap_or_else(|| (event.data.clone(), false)),
+                        None => (event.data.clone(), false),
+                    };
                     let payload = StreamMessage::Event {
                         event_id: event.id,
-                        data: event.data,
+                        data,
                         durable: event.durable,
+                        encrypted,
                     };
                     if socket.send(Message::Text(serde_json::to_string(&payload).unwrap())).await.is_err() {
                         break;
@@ -551,7 +645,18 @@ async fn handle_ws<R: CommandRunner + 'static>(
             _ = snapshot_tick.tick() => {
                 if let Ok(snapshot) = service.capture_output(&session_id, service.config().snapshot_lines) {
                     let snapshot_id = manager.latest_event_id(&session_id);
-                    let payload = StreamMessage::Snapshot { snapshot_id, data: snapshot };
+                    let (data, encrypted) = match &crypto {
+                        Some(crypto) => crypto
+                            .encrypt(&snapshot)
+                            .map(|data| (data, true))
+                            .unwrap_or_else(|| (snapshot.clone(), false)),
+                        None => (snapshot.clone(), false),
+                    };
+                    let payload = StreamMessage::Snapshot {
+                        snapshot_id,
+                        data,
+                        encrypted,
+                    };
                     if socket.send(Message::Text(serde_json::to_string(&payload).unwrap())).await.is_err() {
                         break;
                     }

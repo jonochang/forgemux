@@ -219,6 +219,7 @@ pub struct ForgedConfig {
     pub snapshot_lines: i32,
     pub poll_interval_ms: u64,
     pub snapshot_interval_ms: u64,
+    pub stream_encryption_key: Option<String>,
     pub policies: HashMap<String, PolicyConfig>,
     pub api_tokens: Vec<String>,
     pub default_repo: Option<PathBuf>,
@@ -270,6 +271,7 @@ impl ForgedConfig {
             snapshot_lines: 5000,
             poll_interval_ms: 250,
             snapshot_interval_ms: 30_000,
+            stream_encryption_key: None,
             policies: HashMap::new(),
             api_tokens: Vec::new(),
             default_repo: None,
@@ -340,6 +342,7 @@ impl ForgedConfig {
         if let Some(snapshot_interval_ms) = file.snapshot_interval_ms {
             config.snapshot_interval_ms = snapshot_interval_ms;
         }
+        config.stream_encryption_key = file.stream_encryption_key;
         if let Some(policies) = file.policies {
             config.policies = policies;
         }
@@ -367,6 +370,7 @@ struct ForgedConfigFile {
     pub snapshot_lines: Option<i32>,
     pub poll_interval_ms: Option<u64>,
     pub snapshot_interval_ms: Option<u64>,
+    pub stream_encryption_key: Option<String>,
     pub policies: Option<HashMap<String, PolicyConfig>>,
     pub api_tokens: Option<Vec<String>>,
     pub default_repo: Option<PathBuf>,
@@ -2258,6 +2262,7 @@ input_dedup_window = 55
 snapshot_lines = 123
 poll_interval_ms = 10
 snapshot_interval_ms = 999
+stream_encryption_key = "base64key"
 api_tokens = ["token-1", "token-2"]
 default_repo = "/tmp/project"
  
@@ -2299,6 +2304,7 @@ args = ["session={{session_id}}"]
         assert_eq!(config.snapshot_lines, 123);
         assert_eq!(config.poll_interval_ms, 10);
         assert_eq!(config.snapshot_interval_ms, 999);
+        assert_eq!(config.stream_encryption_key.as_deref(), Some("base64key"));
         assert!(config.policies.contains_key("restricted"));
         assert_eq!(config.api_tokens.len(), 2);
         assert_eq!(config.default_repo, Some(PathBuf::from("/tmp/project")));

@@ -106,6 +106,8 @@ enum Command {
         ttl_secs: i64,
         #[arg(long)]
         qr: bool,
+        #[arg(long)]
+        key: Option<String>,
     },
     Doctor,
     Version,
@@ -602,7 +604,7 @@ fn main() {
                 }
             }
         }
-        Command::Pair { ttl_secs, qr } => {
+        Command::Pair { ttl_secs, qr, key } => {
             let Some(hub_url) = resolve_hub(cli.hub.as_deref(), &cli_config) else {
                 eprintln!("pair requires a hub url (set hub_url in config or pass --hub)");
                 std::process::exit(1);
@@ -619,10 +621,15 @@ fn main() {
             match response {
                 Ok(resp) if resp.status().is_success() => {
                     let body: serde_json::Value = resp.json().unwrap();
-                    let url = body
+                    let mut url = body
                         .get("url")
                         .and_then(|value| value.as_str())
-                        .unwrap_or("");
+                        .unwrap_or("")
+                        .to_string();
+                    if let Some(key) = key {
+                        let separator = if url.contains('?') { "&" } else { "?" };
+                        url = format!("{url}{separator}key={}", urlencoding::encode(&key));
+                    }
                     if url.is_empty() {
                         eprintln!("pair failed: missing url");
                         std::process::exit(1);
@@ -630,7 +637,7 @@ fn main() {
                     println!("{url}");
                     if qr {
                         println!();
-                        println!("{}", render_qr(url));
+                        println!("{}", render_qr(&url));
                     }
                 }
                 Ok(resp) => {

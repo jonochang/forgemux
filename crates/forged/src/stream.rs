@@ -19,10 +19,14 @@ pub enum StreamMessage {
         data: String,
         #[serde(default = "default_true")]
         durable: bool,
+        #[serde(default)]
+        encrypted: bool,
     },
     Input {
         input_id: String,
         data: String,
+        #[serde(default)]
+        encrypted: bool,
     },
     Ack {
         input_id: String,
@@ -30,6 +34,8 @@ pub enum StreamMessage {
     Snapshot {
         snapshot_id: u64,
         data: String,
+        #[serde(default)]
+        encrypted: bool,
     },
 }
 

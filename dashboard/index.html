@@ -246,6 +246,8 @@
       const sendBtn = document.getElementById("send");
       const authToken = new URLSearchParams(window.location.search).get("token");
       const authQuery = authToken ? `?token=${encodeURIComponent(authToken)}` : "";
+      const cryptoKeyBase64 = new URLSearchParams(window.location.search).get("key");
+      const cryptoKeyPromise = cryptoKeyBase64 ? importKey(cryptoKeyBase64) : null;
       let attachSocket = null;
       let currentSessionId = null;
       let pendingInputs = [];
@@ -467,11 +469,14 @@
           );
           flushPending();
         });
-        attachSocket.addEventListener("message", (event) => {
+        attachSocket.addEventListener("message", async (event) => {
           try {
             const payload = JSON.parse(event.data);
             if (payload.type === "snapshot" || payload.type === "event") {
-              const trimmed = trimCapture(payload.data);
+              const decoded = payload.encrypted
+                ? await decryptString(payload.data)
+                : payload.data;
+              const trimmed = trimCapture(decoded);
               if (trimmed !== lastTerminalData) {
                 lastTerminalData = trimmed;
                 terminalEl.innerHTML = ansiToHtml(trimmed);
@@ -494,14 +499,18 @@
       }
 
       // --- Input handling ---
-      function sendInput() {
+      async function sendInput() {
         const value = inputEl.value;
         if (!value) return;
         const inputId = Math.random().toString(36).slice(2);
+        const payloadData = cryptoKeyPromise
+          ? await encryptString(value + "\n")
+          : value + "\n";
         const payload = JSON.stringify({
           type: "input",
           input_id: inputId,
-          data: value + "\n",
+          data: payloadData,
+          encrypted: Boolean(cryptoKeyPromise),
         });
         if (!attachSocket || attachSocket.readyState !== WebSocket.OPEN) {
           pendingInputs.push(payload);
@@ -558,6 +567,58 @@
       }
 
       connectSessionsSocket();
+
+      function base64ToBytes(base64) {
+        const bin = atob(base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) {
+          bytes[i] = bin.charCodeAt(i);
+        }
+        return bytes;
+      }
+
+      function bytesToBase64(bytes) {
+        let bin = "";
+        bytes.forEach((b) => {
+          bin += String.fromCharCode(b);
+        });
+        return btoa(bin);
+      }
+
+      async function importKey(base64) {
+        const raw = base64ToBytes(base64);
+        return crypto.subtle.importKey("raw", raw, "AES-GCM", false, [
+          "encrypt",
+          "decrypt",
+        ]);
+      }
+
+      async function encryptString(value) {
+        const key = await cryptoKeyPromise;
+        if (!key) return value;
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const data = new TextEncoder().encode(value);
+        const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, data);
+        const combined = new Uint8Array(iv.length + ciphertext.byteLength);
+        combined.set(iv, 0);
+        combined.set(new Uint8Array(ciphertext), iv.length);
+        return bytesToBase64(combined);
+      }
+
+      async function decryptString(value) {
+        const key = await cryptoKeyPromise;
+        if (!key) return value;
+        const data = base64ToBytes(value);
+        if (data.length < 13) return "";
+        const iv = data.slice(0, 12);
+        const ciphertext = data.slice(12);
+        const plaintext = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          key,
+          ciphertext
+        );
+        return new TextDecoder().decode(plaintext);
+      }
     </script>
   </body>
 </html>
