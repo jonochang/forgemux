@@ -1231,6 +1231,17 @@ impl<R: CommandRunner> SessionService<R> {
         from: SessionState,
         to: SessionState,
     ) {
+        let record = serde_json::json!({
+            "ts": Utc::now(),
+            "type": "state-change",
+            "session_id": id.as_str(),
+            "from": format!("{from:?}"),
+            "to": format!("{to:?}"),
+        });
+        self.log_event(id, record);
+    }
+
+    fn log_event(&self, id: &forgemux_core::SessionId, record: serde_json::Value) {
         let path = self
             .config
             .data_dir
@@ -1239,13 +1250,6 @@ impl<R: CommandRunner> SessionService<R> {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
-        let record = serde_json::json!({
-            "ts": Utc::now(),
-            "type": "state-change",
-            "session_id": id.as_str(),
-            "from": format!("{from:?}"),
-            "to": format!("{to:?}"),
-        });
         if let Ok(line) = serde_json::to_string(&record)
             && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
         {
@@ -1549,21 +1553,46 @@ fn log_delivery(
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    let event_name = match event {
+        NotificationEvent::WaitingInput => "waiting".to_string(),
+        NotificationEvent::Errored => "errored".to_string(),
+        NotificationEvent::IdleTimeout => "terminated".to_string(),
+    };
     let record = NotificationDelivery {
         ts: Utc::now(),
         session_id: session.id.as_str().to_string(),
-        event: match event {
-            NotificationEvent::WaitingInput => "waiting".to_string(),
-            NotificationEvent::Errored => "errored".to_string(),
-            NotificationEvent::IdleTimeout => "terminated".to_string(),
-        },
+        event: event_name.clone(),
         hook,
         attempt,
         success,
-        error,
+        error: error.clone(),
     };
     if let Ok(line) = serde_json::to_string(&record)
         && let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+    let event_record = serde_json::json!({
+        "ts": record.ts,
+        "type": "notification-delivery",
+        "session_id": session.id.as_str(),
+        "event": event_name,
+        "hook": format!("{:?}", hook),
+        "attempt": attempt,
+        "success": success,
+        "error": error,
+    });
+    let event_path = data_dir
+        .join("events")
+        .join(format!("{}.jsonl", session.id.as_str()));
+    if let Some(parent) = event_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(line) = serde_json::to_string(&event_record)
+        && let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(event_path)
     {
         let _ = writeln!(file, "{line}");
     }
@@ -1863,6 +1892,10 @@ mod tests {
         let content = std::fs::read_to_string(log_path).unwrap();
         assert!(content.contains("\"success\":true"));
         assert!(content.contains("\"event\":\"waiting\""));
+
+        let event_path = tmp.path().join("events").join("S-0003.jsonl");
+        let events = std::fs::read_to_string(event_path).unwrap();
+        assert!(events.contains("\"type\":\"notification-delivery\""));
     }
 
     #[test]
