@@ -1,10 +1,14 @@
 # Changelog
 
-## 0.1.3 - 2026-02-26
+## 0.1.4 - 2026-02-26
+
+- Fix hub config parsing to allow missing `edges`.
+- Strip ANSI escape codes before prompt detection.
+- Fix `fmux ls` tab-delimited output.
 
 - Fetch remotes before worktree creation and track remote branches when present.
 
-## 0.1.2 - 2026-02-26
+## 0.1.3 - 2026-02-26
 
 - Added hub/edge token authentication and CLI token support.
 - Added reliable stream protocol primitives, watch mode, and periodic snapshots.
