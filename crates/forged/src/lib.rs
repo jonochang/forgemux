@@ -838,7 +838,7 @@ impl<R: CommandRunner> SessionService<R> {
         branch: &str,
     ) -> anyhow::Result<()> {
         if worktree_path.exists() {
-            anyhow::bail!("worktree path already exists: {}", worktree_path.display());
+            return Ok(());
         }
         if let Some(parent) = worktree_path.parent() {
             fs::create_dir_all(parent)?;
@@ -1283,6 +1283,29 @@ mod tests {
                 && call.contains(&"-b".to_string())
                 && call.contains(&"origin/test-branch".to_string())
         }));
+    }
+
+    #[test]
+    fn create_worktree_reuses_existing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let status = Command::new("git").arg("init").arg(&repo).status().unwrap();
+        assert!(status.success());
+
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner.clone());
+
+        let worktree_path = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree_path).unwrap();
+
+        service
+            .create_worktree(&repo, &worktree_path, "test-branch")
+            .unwrap();
+
+        let calls = runner.calls();
+        assert!(calls.is_empty());
     }
 
     #[test]
