@@ -787,8 +787,10 @@ impl<R: CommandRunner> SessionService<R> {
             );
         }
         let mut record = self.store.load(&id)?;
+        let from_state = record.state.clone();
         record.touch_state(SessionState::Terminated);
         self.store.save(&record)?;
+        self.log_state_change(&record.id, from_state, SessionState::Terminated);
         Ok(())
     }
 
@@ -1675,6 +1677,28 @@ mod tests {
         let sessions = service.list_sessions().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].state, SessionState::Errored);
+    }
+
+    #[test]
+    fn stop_session_writes_state_change_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
+        record.id = forgemux_core::SessionId::from("S-STOP1");
+        record.touch_state(SessionState::Running);
+        service.store.save(&record).unwrap();
+
+        service.stop_session(record.id.as_str()).unwrap();
+
+        let path = tmp
+            .path()
+            .join("events")
+            .join(format!("{}.jsonl", record.id.as_str()));
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("\"to\":\"Terminated\""));
     }
 
     #[test]
