@@ -16,11 +16,16 @@
         --terminal-ink: #e6e6e6;
         --muted: #5c5348;
       }
+      html, body {
+        height: 100%;
+      }
       body {
         margin: 0;
         font-family: "Space Grotesk", "IBM Plex Sans", sans-serif;
         background: radial-gradient(circle at top, #fff4e6, var(--bg));
         color: var(--ink);
+        display: flex;
+        flex-direction: column;
       }
       header {
         padding: 24px;
@@ -34,9 +39,12 @@
         padding: 24px;
         display: grid;
         gap: 20px;
-        max-width: 1200px;
+        max-width: 2400px;
         margin: 0 auto;
         box-sizing: border-box;
+        flex: 1;
+        width: 100%;
+        overflow: hidden;
       }
       .card {
         background: var(--panel);
@@ -44,6 +52,18 @@
         border-radius: 12px;
         padding: 16px;
         min-width: 0;
+        min-height: 0;
+        outline: none;
+        display: flex;
+        flex-direction: column;
+      }
+      .card:focus-visible {
+        border-color: var(--accent);
+      }
+      #sessions {
+        flex: 1;
+        overflow-y: auto;
+        min-height: 0;
       }
       .muted {
         color: var(--muted);
@@ -54,6 +74,7 @@
       .grid {
         display: grid;
         grid-template-columns: 1fr 2fr;
+        grid-template-rows: 1fr;
         gap: 20px;
       }
       @media (max-width: 768px) {
@@ -121,7 +142,8 @@
         color: var(--terminal-ink);
         border-radius: 12px;
         padding: 16px;
-        height: 420px;
+        flex: 1;
+        min-height: 200px;
         overflow-y: auto;
         overflow-x: hidden;
         white-space: pre-wrap;
@@ -202,7 +224,7 @@
       <div class="muted">Live sessions and browser attach</div>
     </header>
     <main class="grid">
-      <div class="card">
+      <div class="card" id="sessions-card" tabindex="0">
         <strong>Sessions</strong>
         <div class="muted" id="sessions">Loading sessions...</div>
       </div>
@@ -233,6 +255,27 @@
       let pendingInputs = [];
       let lastTerminalData = null;
       let lastSessionsJson = null;
+      let sessionsInteracting = false;
+      let deferredSessions = null;
+      const sessionsCard = document.getElementById("sessions-card");
+
+      function setSessionsInteracting(active) {
+        sessionsInteracting = active;
+        if (!active && deferredSessions) {
+          renderSessions(deferredSessions);
+          deferredSessions = null;
+        }
+      }
+
+      sessionsCard.addEventListener("mouseenter", () => setSessionsInteracting(true));
+      sessionsCard.addEventListener("mouseleave", () => {
+        if (!sessionsCard.contains(document.activeElement)) setSessionsInteracting(false);
+      });
+      sessionsCard.addEventListener("focusin", () => setSessionsInteracting(true));
+      sessionsCard.addEventListener("focusout", (e) => {
+        if (!sessionsCard.contains(e.relatedTarget) && !sessionsCard.matches(":hover"))
+          setSessionsInteracting(false);
+      });
 
       // --- ANSI color support ---
       const ANSI_COLORS = [
@@ -379,6 +422,7 @@
         const branch = branchFromRepo(session.repo_root);
         const row = document.createElement("div");
         row.className = archived ? "session-row archived" : "session-row";
+        row.dataset.id = session.id;
         row.innerHTML = `
           <div class="session-header">
             <span class="session-branch" title="${escapeHtml(session.repo_root || "")}">${escapeHtml(branch || session.id)}</span>
@@ -392,24 +436,73 @@
         return row;
       }
 
+      function updateRow(row, session) {
+        const badge = row.querySelector(".badge");
+        if (badge) {
+          badge.className = badgeClass(session.state);
+          badge.textContent = session.state;
+        }
+        const meta = row.querySelector(".session-meta");
+        if (meta) {
+          meta.innerHTML =
+            `${escapeHtml(session.id)} &middot; ${escapeHtml(session.agent)} ${escapeHtml(session.model)} &middot; ${timeAgo(session.last_activity_at)}`;
+        }
+      }
+
       function renderSessions(sessions) {
         if (!sessions.length) {
           sessionsEl.textContent = "No sessions found.";
           return;
         }
+
         const active = sessions.filter((s) => !isArchived(s.state));
         const archived = sessions.filter((s) => isArchived(s.state));
+        const existingRows = sessionsEl.querySelectorAll(".session-row[data-id]");
+        const existingIds = new Set();
+        existingRows.forEach((r) => existingIds.add(r.dataset.id));
+        const newActiveIds = new Set(active.map((s) => s.id));
+        const newArchivedIds = new Set(archived.map((s) => s.id));
+        const newAllIds = new Set([...newActiveIds, ...newArchivedIds]);
 
-        sessionsEl.innerHTML = "";
+        // Check if we can do an in-place update (same set of ids, same partitioning)
+        let canPatch = existingIds.size === newAllIds.size;
+        if (canPatch) {
+          for (const id of existingIds) {
+            if (!newAllIds.has(id)) { canPatch = false; break; }
+          }
+        }
+        if (canPatch) {
+          // Check partitioning hasn't changed (active vs archived)
+          for (const row of existingRows) {
+            const isArc = row.classList.contains("archived");
+            const shouldBeArc = newArchivedIds.has(row.dataset.id);
+            if (isArc !== shouldBeArc) { canPatch = false; break; }
+          }
+        }
+
+        if (canPatch) {
+          // In-place update: just patch text in existing rows
+          const byId = new Map(sessions.map((s) => [s.id, s]));
+          existingRows.forEach((row) => updateRow(row, byId.get(row.dataset.id)));
+          // Update archive count
+          const archiveHeader = sessionsEl.querySelector(".archive-header");
+          if (archiveHeader && archived.length) {
+            archiveHeader.innerHTML = `<span class="archive-toggle ${archiveOpen ? "open" : ""}">&#9654;</span> Archived (${archived.length})`;
+          }
+          return;
+        }
+
+        // Full rebuild
+        const frag = document.createDocumentFragment();
 
         if (active.length) {
-          active.forEach((s) => sessionsEl.appendChild(makeSessionRow(s, false)));
+          active.forEach((s) => frag.appendChild(makeSessionRow(s, false)));
         } else {
           const msg = document.createElement("div");
           msg.className = "muted small";
           msg.style.padding = "10px 0";
           msg.textContent = "No active sessions.";
-          sessionsEl.appendChild(msg);
+          frag.appendChild(msg);
         }
 
         if (archived.length) {
@@ -424,9 +517,12 @@
             body.classList.toggle("collapsed", !archiveOpen);
             header.querySelector(".archive-toggle").classList.toggle("open", archiveOpen);
           });
-          sessionsEl.appendChild(header);
-          sessionsEl.appendChild(body);
+          frag.appendChild(header);
+          frag.appendChild(body);
         }
+
+        sessionsEl.innerHTML = "";
+        sessionsEl.appendChild(frag);
       }
 
       // --- Attach ---
@@ -439,17 +535,20 @@
         attachHelp.textContent = `Attached to ${id}`;
         terminalEl.innerHTML = "Connecting...";
         const protocol = location.protocol === "https:" ? "wss" : "ws";
-        attachSocket = new WebSocket(
+        const ws = new WebSocket(
           `${protocol}://${location.host}/sessions/${id}/attach`
         );
-        attachSocket.addEventListener("open", () => {
+        attachSocket = ws;
+        ws.addEventListener("open", () => {
+          if (attachSocket !== ws) return;
           statusEl.textContent = "Attached. Waiting for data...";
-          attachSocket.send(
+          ws.send(
             JSON.stringify({ type: "resume", last_seen_event_id: 0 })
           );
           flushPending();
         });
-        attachSocket.addEventListener("message", (event) => {
+        ws.addEventListener("message", (event) => {
+          if (attachSocket !== ws) return;
           try {
             const payload = JSON.parse(event.data);
             if (payload.type === "snapshot" || payload.type === "event") {
@@ -467,7 +566,8 @@
             terminalEl.textContent = event.data;
           }
         });
-        attachSocket.addEventListener("close", () => {
+        ws.addEventListener("close", () => {
+          if (attachSocket !== ws) return;
           statusEl.textContent = "Attach socket closed.";
           if (currentSessionId) {
             setTimeout(() => attachSession(currentSessionId), 1500);
@@ -527,7 +627,11 @@
             if (event.data === lastSessionsJson) return;
             lastSessionsJson = event.data;
             const sessions = JSON.parse(event.data);
-            renderSessions(sessions);
+            if (sessionsInteracting) {
+              deferredSessions = sessions;
+            } else {
+              renderSessions(sessions);
+            }
           } catch (e) {
             sessionsEl.textContent = "Failed to parse sessions.";
           }
