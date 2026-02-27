@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6 - 2026-02-27
+
+- Add agent log watching to improve WaitingInput detection.
+- Add forged PID lock and orphan tmux session cleanup.
+- Add `fmux doctor` diagnostics for config and connectivity.
+- Add notification retries, fallback behavior, and delivery logs.
+- Update protocol specs with versioning and durable/ephemeral events.
+
 ## 0.1.5 - 2026-02-27
 
 - Embed hub dashboard index.html in the binary for /.
