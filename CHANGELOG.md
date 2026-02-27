@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.10 - 2026-02-27
+
+- Add session hub metadata types and risk scoring logic.
+- Add hub session cache persistence and edge polling for session snapshots.
+
 ## 0.1.9 - 2026-02-27
 
 - Add decision queue data model, hub CRUD, and websocket events.

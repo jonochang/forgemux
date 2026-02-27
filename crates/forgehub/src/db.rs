@@ -1,7 +1,10 @@
 use anyhow::Context;
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
-use forgemux_core::{Decision, DecisionAction, DecisionContext, DecisionResolution, Severity};
+use forgemux_core::{
+    Decision, DecisionAction, DecisionContext, DecisionResolution, SessionHubMeta, SessionState,
+    Severity,
+};
 use sqlx::FromRow;
 use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -239,6 +242,108 @@ pub async fn decision_count(pool: &SqlitePool) -> anyhow::Result<u64> {
     Ok(count.0 as u64)
 }
 
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct CachedSession {
+    pub session_id: String,
+    pub workspace_id: String,
+    pub edge_id: String,
+    pub hub_meta: SessionHubMeta,
+    pub state: SessionState,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[allow(dead_code)]
+pub async fn upsert_session_cache(
+    pool: &SqlitePool,
+    session_id: &str,
+    workspace_id: &str,
+    edge_id: &str,
+    hub_meta: &SessionHubMeta,
+    state: SessionState,
+) -> anyhow::Result<()> {
+    let meta_json = serde_json::to_string(hub_meta)?;
+    let state_json = serde_json::to_string(&state)?;
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        r#"
+        INSERT INTO session_cache (session_id, workspace_id, edge_id, hub_meta_json, state, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(session_id) DO UPDATE SET
+            workspace_id = excluded.workspace_id,
+            edge_id = excluded.edge_id,
+            hub_meta_json = excluded.hub_meta_json,
+            state = excluded.state,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(session_id)
+    .bind(workspace_id)
+    .bind(edge_id)
+    .bind(meta_json)
+    .bind(state_json)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub async fn list_cached_sessions(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> anyhow::Result<Vec<CachedSession>> {
+    let rows: Vec<(String, String, String, String, String, String)> = sqlx::query_as(
+        r#"
+        SELECT session_id, workspace_id, edge_id, hub_meta_json, state, updated_at
+        FROM session_cache
+        WHERE workspace_id = ?
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::new();
+    for (session_id, workspace_id, edge_id, meta_json, state_json, updated_at) in rows {
+        let hub_meta: SessionHubMeta = serde_json::from_str(&meta_json)?;
+        let state: SessionState = serde_json::from_str(&state_json)?;
+        let updated_at = DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&Utc);
+        out.push(CachedSession {
+            session_id,
+            workspace_id,
+            edge_id,
+            hub_meta,
+            state,
+            updated_at,
+        });
+    }
+    Ok(out)
+}
+
+#[allow(dead_code)]
+pub async fn mark_edge_sessions_unreachable(
+    pool: &SqlitePool,
+    edge_id: &str,
+) -> anyhow::Result<u64> {
+    let state_json = serde_json::to_string(&SessionState::Unreachable)?;
+    let now = Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        r#"
+        UPDATE session_cache
+        SET state = ?, updated_at = ?
+        WHERE edge_id = ?
+        "#,
+    )
+    .bind(state_json)
+    .bind(now)
+    .bind(edge_id)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
+}
+
 fn decision_from_row(row: DecisionRow) -> anyhow::Result<Decision> {
     let context: DecisionContext = serde_json::from_str(&row.context_json)?;
     let severity = severity_from_str(&row.severity)?;
@@ -425,5 +530,43 @@ mod tests {
             .unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].id, "D-0001");
+    }
+
+    #[tokio::test]
+    async fn session_cache_roundtrip_and_unreachable() {
+        let tmp = tempdir().unwrap();
+        let pool = init_db(tmp.path()).await.unwrap();
+        seed_workspace(&pool).await;
+
+        let meta = SessionHubMeta {
+            workspace_id: "ws-1".to_string(),
+            goal: "Ship".to_string(),
+            risk: forgemux_core::RiskLevel::Green,
+            context_pct: 10,
+            touched_repos: vec![],
+            pending_decisions: 0,
+            tests_status: forgemux_core::TestsStatus::None,
+            tokens_total: "0".to_string(),
+            estimated_cost_usd: 0.0,
+            lines_added: 0,
+            lines_removed: 0,
+            commits: 0,
+        };
+
+        upsert_session_cache(&pool, "S-1", "ws-1", "edge-1", &meta, SessionState::Running)
+            .await
+            .unwrap();
+
+        let list = list_cached_sessions(&pool, "ws-1").await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].state, SessionState::Running);
+
+        let updated = mark_edge_sessions_unreachable(&pool, "edge-1")
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+
+        let list = list_cached_sessions(&pool, "ws-1").await.unwrap();
+        assert_eq!(list[0].state, SessionState::Unreachable);
     }
 }

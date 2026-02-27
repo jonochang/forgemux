@@ -103,6 +103,10 @@ fn main() -> anyhow::Result<()> {
                 .fallback_service(ServeDir::new("dashboard"))
                 .with_state(shared);
             rt.block_on(async move {
+                let poller = service.clone();
+                tokio::spawn(async move {
+                    poller.poll_edges().await;
+                });
                 let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
                 axum::serve(listener, app).await.unwrap();
             });

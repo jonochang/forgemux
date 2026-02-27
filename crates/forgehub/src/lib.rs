@@ -1,7 +1,8 @@
 use anyhow::Context;
 use chrono::{DateTime, Utc};
 use forgemux_core::{
-    Decision, DecisionAction, DecisionResolution, SessionRecord, SessionStore, sort_sessions,
+    Decision, DecisionAction, DecisionResolution, RiskLevel, SessionHubMeta, SessionRecord,
+    SessionStore, TestsStatus, sort_sessions,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -10,12 +11,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
+use tokio::time::{Duration, interval};
 
 mod db;
+mod risk;
 use db::{
     decision_count, ensure_workspace, get_decision, init_db, insert_decision, list_decisions,
-    log_budget_action, resolve_decision,
+    log_budget_action, mark_edge_sessions_unreachable, resolve_decision, upsert_session_cache,
 };
+use risk::compute_risk;
 
 pub use db::DecisionStatus;
 
@@ -58,6 +62,7 @@ pub struct HubService {
     issued_tokens: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     decision_tx: broadcast::Sender<DecisionEvent>,
     decision_counter: Arc<Mutex<u64>>,
+    edge_failures: Arc<Mutex<HashMap<String, u8>>>,
     #[allow(dead_code)]
     db: SqlitePool,
 }
@@ -75,6 +80,7 @@ impl HubService {
             issued_tokens: Arc::new(Mutex::new(HashMap::new())),
             decision_tx,
             decision_counter: Arc::new(Mutex::new(counter)),
+            edge_failures: Arc::new(Mutex::new(HashMap::new())),
             db,
         })
     }
@@ -219,6 +225,96 @@ impl HubService {
         Ok(sort_sessions(sessions))
     }
 
+    pub async fn poll_edges(self: Arc<Self>) {
+        let client = reqwest::Client::new();
+        let mut ticker = interval(Duration::from_secs(3));
+        loop {
+            ticker.tick().await;
+            let edges = self.list_registered_edges();
+            if edges.is_empty() {
+                continue;
+            }
+            let pending = self
+                .list_decisions("default", None, Some(DecisionStatus::Pending))
+                .await
+                .unwrap_or_default();
+            for edge in edges {
+                let url = format!("{}/sessions", normalize_http_addr(&edge.addr));
+                match client.get(&url).send().await {
+                    Ok(resp) if resp.status().is_success() => {
+                        match resp.json::<Vec<SessionRecord>>().await {
+                            Ok(sessions) => {
+                                self.mark_edge_success(&edge.id);
+                                self.cache_edge_sessions(&edge.id, sessions, &pending).await;
+                            }
+                            Err(_) => {
+                                self.mark_edge_failure(&edge.id).await;
+                            }
+                        }
+                    }
+                    _ => {
+                        self.mark_edge_failure(&edge.id).await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn cache_edge_sessions(
+        &self,
+        edge_id: &str,
+        sessions: Vec<SessionRecord>,
+        pending: &[Decision],
+    ) {
+        for session in sessions {
+            let goal = session
+                .goal
+                .clone()
+                .unwrap_or_else(|| "(no goal set)".to_string());
+            let mut meta = SessionHubMeta {
+                workspace_id: "default".to_string(),
+                goal,
+                risk: RiskLevel::Green,
+                context_pct: 0,
+                touched_repos: vec![session.repo_root.display().to_string()],
+                pending_decisions: pending.len() as u32,
+                tests_status: TestsStatus::None,
+                tokens_total: "0".to_string(),
+                estimated_cost_usd: 0.0,
+                lines_added: 0,
+                lines_removed: 0,
+                commits: 0,
+            };
+            meta.risk = compute_risk(&meta, pending, session.state.clone(), Utc::now());
+            let _ = upsert_session_cache(
+                &self.db,
+                session.id.as_ref(),
+                &meta.workspace_id,
+                edge_id,
+                &meta,
+                session.state,
+            )
+            .await;
+        }
+    }
+
+    async fn mark_edge_failure(&self, edge_id: &str) {
+        let should_mark = {
+            let mut failures = self.edge_failures.lock().unwrap();
+            let count = failures.entry(edge_id.to_string()).or_insert(0);
+            *count = count.saturating_add(1);
+            *count >= 2
+        };
+        if should_mark {
+            let _ = mark_edge_sessions_unreachable(&self.db, edge_id).await;
+        }
+    }
+
+    fn mark_edge_success(&self, edge_id: &str) {
+        let mut failures = self.edge_failures.lock().unwrap();
+        failures.insert(edge_id.to_string(), 0);
+    }
+
     pub fn subscribe_decisions(&self) -> broadcast::Receiver<DecisionEvent> {
         self.decision_tx.subscribe()
     }
@@ -319,6 +415,14 @@ fn normalize_ws_addr(addr: &str) -> String {
         format!("ws://{rest}")
     } else {
         format!("ws://{addr}")
+    }
+}
+
+fn normalize_http_addr(addr: &str) -> String {
+    if addr.starts_with("http://") || addr.starts_with("https://") {
+        addr.to_string()
+    } else {
+        format!("http://{addr}")
     }
 }
 
