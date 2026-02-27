@@ -7,13 +7,17 @@ use forgemux_core::{
 use regex::Regex;
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::SystemTime;
 
+mod agent;
 pub mod checks;
 pub mod server;
 pub mod stream;
+
+use agent::{AgentAdapter, AgentLogSignal, ConfigAdapter};
 
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output>;
@@ -86,6 +90,7 @@ pub struct AgentConfig {
     pub command: String,
     pub args: Vec<String>,
     pub prompt_patterns: Vec<String>,
+    pub usage_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,6 +113,57 @@ pub struct NotificationConfig {
     pub on_error: Vec<NotificationHook>,
     pub on_idle_timeout: Vec<NotificationHook>,
     pub debounce_secs: i64,
+}
+
+#[derive(Clone)]
+struct AgentAdapters {
+    adapters: HashMap<AgentType, ConfigAdapter>,
+}
+
+impl AgentAdapters {
+    fn new(config: &ForgedConfig) -> Self {
+        let mut adapters = HashMap::new();
+        for (agent, agent_config) in &config.agents {
+            let prompt_patterns = agent_config
+                .prompt_patterns
+                .iter()
+                .filter_map(|pat| Regex::new(pat).ok())
+                .collect::<Vec<_>>();
+            let usage_paths = agent_config
+                .usage_paths
+                .iter()
+                .map(|path| expand_tilde(path))
+                .collect::<Vec<_>>();
+            adapters.insert(
+                agent.clone(),
+                ConfigAdapter::new(agent.clone(), prompt_patterns, usage_paths),
+            );
+        }
+        Self { adapters }
+    }
+
+    fn adapter_for(&self, agent: &AgentType) -> Option<&ConfigAdapter> {
+        self.adapters.get(agent)
+    }
+
+    fn prompt_patterns(&self) -> Vec<Regex> {
+        self.adapters
+            .values()
+            .flat_map(|adapter| adapter.prompt_patterns().to_vec())
+            .collect()
+    }
+}
+
+#[derive(Default)]
+struct LogWatcher {
+    cursors: HashMap<forgemux_core::SessionId, LogCursor>,
+}
+
+#[derive(Clone)]
+struct LogCursor {
+    path: Option<PathBuf>,
+    offset: u64,
+    waiting_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +196,10 @@ impl ForgedConfig {
                 command: "claude".to_string(),
                 args: vec!["--dangerously-skip-permissions".to_string()],
                 prompt_patterns: vec![r"(?m)^>\s*$".to_string()],
+                usage_paths: vec![
+                    "~/.config/claude/projects/".to_string(),
+                    "~/.claude/projects/".to_string(),
+                ],
             },
         );
         agents.insert(
@@ -148,6 +208,7 @@ impl ForgedConfig {
                 command: "codex".to_string(),
                 args: vec![],
                 prompt_patterns: vec![r"(?m)^(?:> |\$ )".to_string()],
+                usage_paths: vec!["~/.codex/sessions/".to_string()],
             },
         );
 
@@ -214,6 +275,9 @@ impl ForgedConfig {
                 }
                 if let Some(prompt_patterns) = agent.prompt_patterns {
                     entry.prompt_patterns = prompt_patterns;
+                }
+                if let Some(usage_paths) = agent.usage_paths {
+                    entry.usage_paths = usage_paths;
                 }
             }
         }
@@ -283,6 +347,7 @@ struct AgentFile {
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
     pub prompt_patterns: Option<Vec<String>>,
+    pub usage_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -344,6 +409,8 @@ pub struct SessionService<R: CommandRunner> {
     manager: SessionManager,
     notifier: NotificationEngine,
     stream_manager: stream::StreamManager,
+    adapters: AgentAdapters,
+    log_watcher: std::sync::Mutex<LogWatcher>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -375,6 +442,7 @@ impl<R: CommandRunner> SessionService<R> {
         let manager = SessionManager::new(store.clone());
         let ring_capacity = config.event_ring_capacity;
         let dedup_window = config.input_dedup_window;
+        let adapters = AgentAdapters::new(&config);
         Self {
             config,
             runner,
@@ -382,6 +450,8 @@ impl<R: CommandRunner> SessionService<R> {
             manager,
             notifier: NotificationEngine::new(),
             stream_manager: stream::StreamManager::new(ring_capacity, dedup_window),
+            adapters,
+            log_watcher: std::sync::Mutex::new(LogWatcher::default()),
         }
     }
 
@@ -562,11 +632,13 @@ impl<R: CommandRunner> SessionService<R> {
             let last_output_at = self
                 .transcript_mtime(&session.id)
                 .unwrap_or(session.last_activity_at);
+            let waiting_hint = self.waiting_hint(&session, last_output_at);
             let signal = StateSignal {
                 process_alive: self.has_session(&session.id),
                 exit_code: None,
                 last_output_at,
                 recent_output: output,
+                waiting_hint,
             };
             let state = detector.detect(Utc::now(), &signal);
             if state != session.state {
@@ -715,18 +787,84 @@ impl<R: CommandRunner> SessionService<R> {
     }
 
     fn build_detector(&self) -> StateDetector {
-        let patterns = self
-            .config
-            .agents
-            .values()
-            .flat_map(|cfg| cfg.prompt_patterns.iter())
-            .filter_map(|pat| Regex::new(pat).ok())
-            .collect();
+        let patterns = self.adapters.prompt_patterns();
         StateDetector::new(
             self.config.idle_threshold_secs,
             self.config.waiting_threshold_secs,
             patterns,
         )
+    }
+
+    fn waiting_hint(&self, session: &SessionRecord, last_output_at: DateTime<Utc>) -> bool {
+        let Some(adapter) = self.adapters.adapter_for(&session.agent) else {
+            return false;
+        };
+        let mut watcher = self.log_watcher.lock().unwrap();
+        let cursor = watcher
+            .cursors
+            .entry(session.id.clone())
+            .or_insert_with(|| LogCursor {
+                path: None,
+                offset: 0,
+                waiting_since: None,
+            });
+
+        if cursor.path.is_none() {
+            cursor.path = self.resolve_log_path(adapter, &session.repo_root);
+            cursor.offset = 0;
+        }
+
+        if let Some(path) = cursor.path.clone() {
+            self.read_log_updates(adapter, &path, cursor);
+        }
+
+        if let Some(waiting_since) = cursor.waiting_since
+            && last_output_at > waiting_since
+        {
+            cursor.waiting_since = None;
+        }
+
+        cursor.waiting_since.is_some()
+    }
+
+    fn resolve_log_path(&self, adapter: &dyn AgentAdapter, repo_root: &Path) -> Option<PathBuf> {
+        for path in adapter.log_paths(repo_root) {
+            if path.is_file() && is_jsonl(&path) {
+                return Some(path);
+            }
+            if path.is_dir()
+                && let Some(found) = find_latest_jsonl(&path)
+            {
+                return Some(found);
+            }
+        }
+        None
+    }
+
+    fn read_log_updates(&self, adapter: &dyn AgentAdapter, path: &Path, cursor: &mut LogCursor) {
+        let Ok(metadata) = fs::metadata(path) else {
+            return;
+        };
+        if metadata.len() < cursor.offset {
+            cursor.offset = 0;
+        }
+        let mut file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => return,
+        };
+        if file.seek(std::io::SeekFrom::Start(cursor.offset)).is_err() {
+            return;
+        }
+        let mut buf = String::new();
+        if file.read_to_string(&mut buf).is_err() {
+            return;
+        }
+        cursor.offset = cursor.offset.saturating_add(buf.len() as u64);
+        for line in buf.lines() {
+            if let Some(AgentLogSignal::WaitingInput) = adapter.parse_log_line(line) {
+                cursor.waiting_since = Some(Utc::now());
+            }
+        }
     }
 
     fn capture_recent_output(&self, id: &forgemux_core::SessionId) -> anyhow::Result<String> {
@@ -1139,6 +1277,50 @@ fn render_template(template: &str, session: &SessionRecord, event: NotificationE
         .replace("{{agent}}", &format!("{:?}", session.agent))
 }
 
+fn expand_tilde(path: &str) -> PathBuf {
+    if let Some(stripped) = path.strip_prefix("~/")
+        && let Ok(home) = std::env::var("HOME")
+    {
+        return PathBuf::from(home).join(stripped);
+    }
+    PathBuf::from(path)
+}
+
+fn is_jsonl(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("jsonl"))
+        .unwrap_or(false)
+}
+
+fn find_latest_jsonl(dir: &Path) -> Option<PathBuf> {
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in walkdir::WalkDir::new(dir)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+    {
+        let path = entry.path();
+        if !is_jsonl(path) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        match &newest {
+            Some((seen, _)) if *seen >= modified => {}
+            _ => {
+                newest = Some((modified, path.to_path_buf()));
+            }
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1245,6 +1427,36 @@ mod tests {
         let calls = runner.calls();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0][0], "echo");
+    }
+
+    #[test]
+    fn refresh_states_uses_agent_log_waiting_hint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("project");
+        std::fs::create_dir_all(&repo).unwrap();
+        let logs_root = tmp.path().join("logs");
+        let project_logs = logs_root.join("project");
+        std::fs::create_dir_all(&project_logs).unwrap();
+        let log_file = project_logs.join("session.jsonl");
+        std::fs::write(&log_file, r#"{"type":"permission_request"}"#).unwrap();
+
+        let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        if let Some(agent) = config.agents.get_mut(&AgentType::Claude) {
+            agent.usage_paths = vec![logs_root.to_string_lossy().to_string()];
+        }
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner);
+
+        let mut record = service
+            .manager
+            .create_session(AgentType::Claude, "sonnet", &repo)
+            .unwrap();
+        record.touch_state(SessionState::Running);
+        service.store.save(&record).unwrap();
+
+        let sessions = service.refresh_states().unwrap();
+        let updated = sessions.iter().find(|s| s.id == record.id).unwrap();
+        assert_eq!(updated.state, SessionState::WaitingInput);
     }
 
     #[test]
