@@ -101,6 +101,12 @@ enum Command {
     Usage {
         session_id: String,
     },
+    Pair {
+        #[arg(long, default_value_t = 600)]
+        ttl_secs: i64,
+        #[arg(long)]
+        qr: bool,
+    },
     Doctor,
     Version,
 }
@@ -596,6 +602,47 @@ fn main() {
                 }
             }
         }
+        Command::Pair { ttl_secs, qr } => {
+            let Some(hub_url) = resolve_hub(cli.hub.as_deref(), &cli_config) else {
+                eprintln!("pair requires a hub url (set hub_url in config or pass --hub)");
+                std::process::exit(1);
+            };
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/pairing/start", hub_url.trim_end_matches('/'));
+            let req = apply_headers(
+                client
+                    .post(url)
+                    .json(&serde_json::json!({ "ttl_secs": ttl_secs })),
+                token.as_deref(),
+            );
+            let response = req.send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let body: serde_json::Value = resp.json().unwrap();
+                    let url = body
+                        .get("url")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if url.is_empty() {
+                        eprintln!("pair failed: missing url");
+                        std::process::exit(1);
+                    }
+                    println!("{url}");
+                    if qr {
+                        println!();
+                        println!("{}", render_qr(url));
+                    }
+                }
+                Ok(resp) => {
+                    eprintln!("pair failed: {}", resp.status());
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("pair failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Command::Doctor => {
             let config_path = expand_tilde(&cli.config);
             if let Err(err) = load_cli_config(&cli.config) {
@@ -784,6 +831,19 @@ fn check_health(url: &str, token: Option<&str>) -> bool {
     req.send()
         .map(|resp| resp.status().is_success())
         .unwrap_or(false)
+}
+
+fn render_qr(data: &str) -> String {
+    let qr = qrcodegen::QrCode::encode_text(data, qrcodegen::QrCodeEcc::Low).unwrap();
+    let mut out = String::new();
+    let border = 2;
+    for y in -border..qr.size() + border {
+        for x in -border..qr.size() + border {
+            out.push(if qr.get_module(x, y) { '█' } else { ' ' });
+        }
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]

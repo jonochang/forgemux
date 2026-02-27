@@ -42,6 +42,8 @@ pub struct HubService {
     config: HubConfig,
     registry: Arc<Mutex<HashMap<String, EdgeRegistration>>>,
     round_robin: Arc<Mutex<usize>>,
+    pairing_tokens: Arc<Mutex<HashMap<String, PairingToken>>>,
+    issued_tokens: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
 }
 
 impl HubService {
@@ -50,6 +52,8 @@ impl HubService {
             config,
             registry: Arc::new(Mutex::new(HashMap::new())),
             round_robin: Arc::new(Mutex::new(0)),
+            pairing_tokens: Arc::new(Mutex::new(HashMap::new())),
+            issued_tokens: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -62,7 +66,55 @@ impl HubService {
     }
 
     pub fn is_token_valid(&self, token: &str) -> bool {
-        self.config.tokens.iter().any(|t| t == token)
+        if self.config.tokens.iter().any(|t| t == token) {
+            return true;
+        }
+        self.cleanup_expired_tokens();
+        self.issued_tokens.lock().unwrap().get(token).is_some()
+    }
+
+    pub fn start_pairing(&self, ttl_secs: i64) -> PairingToken {
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs.max(30));
+        let record = PairingToken {
+            token: token.clone(),
+            expires_at,
+        };
+        self.pairing_tokens
+            .lock()
+            .unwrap()
+            .insert(token.clone(), record.clone());
+        record
+    }
+
+    pub fn exchange_pairing(&self, token: &str, ttl_secs: i64) -> Option<IssuedToken> {
+        let mut pairing = self.pairing_tokens.lock().unwrap();
+        let record = pairing.remove(token)?;
+        if record.expires_at < Utc::now() {
+            return None;
+        }
+        let access = uuid::Uuid::new_v4().simple().to_string();
+        let expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs.max(60));
+        self.issued_tokens
+            .lock()
+            .unwrap()
+            .insert(access.clone(), expires_at);
+        Some(IssuedToken {
+            token: access,
+            expires_at,
+        })
+    }
+
+    fn cleanup_expired_tokens(&self) {
+        let now = Utc::now();
+        self.issued_tokens
+            .lock()
+            .unwrap()
+            .retain(|_, expires| *expires > now);
+        self.pairing_tokens
+            .lock()
+            .unwrap()
+            .retain(|_, record| record.expires_at > now);
     }
 
     pub fn register_edge(&self, id: String, addr: String) -> EdgeRegistration {
@@ -144,6 +196,18 @@ impl HubService {
         }
         Ok(sort_sessions(sessions))
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingToken {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssuedToken {
+    pub token: String,
+    pub expires_at: DateTime<Utc>,
 }
 
 fn normalize_ws_addr(addr: &str) -> String {
@@ -248,5 +312,19 @@ mod tests {
         assert_eq!(cfg.data_dir, PathBuf::from("./.forgemux-hub"));
         assert!(cfg.edges.is_empty());
         assert!(cfg.tokens.is_empty());
+    }
+
+    #[test]
+    fn pairing_tokens_exchange_for_access_token() {
+        let tmp = tempdir().unwrap();
+        let service = HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: vec![],
+            tokens: Vec::new(),
+        });
+
+        let pairing = service.start_pairing(60);
+        let issued = service.exchange_pairing(&pairing.token, 300).unwrap();
+        assert!(service.is_token_valid(&issued.token));
     }
 }

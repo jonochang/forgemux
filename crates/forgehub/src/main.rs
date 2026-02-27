@@ -79,6 +79,9 @@ fn main() -> anyhow::Result<()> {
                 .route("/sessions/:id/input", post(session_input))
                 .route("/sessions/:id/usage", get(session_usage))
                 .route("/foreman/report", get(foreman_report))
+                .route("/pairing/start", post(pairing_start))
+                .route("/pairing/exchange", post(pairing_exchange))
+                .route("/pair", get(pairing_landing))
                 .route("/edges", get(list_edges))
                 .route("/edges/register", post(register_edge))
                 .route("/edges/heartbeat", post(heartbeat))
@@ -519,6 +522,120 @@ async fn foreman_report(
         )
             .into_response(),
     }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PairingStartRequest {
+    ttl_secs: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PairingExchangeRequest {
+    token: String,
+    ttl_secs: Option<i64>,
+}
+
+async fn pairing_start(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Json(req): Json<PairingStartRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if service.tokens_required() && !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let ttl = req.ttl_secs.unwrap_or(600);
+    let pairing = service.start_pairing(ttl);
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("localhost");
+    let url = format!("http://{host}/pair?token={}", pairing.token);
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "pair_token": pairing.token,
+            "expires_at": pairing.expires_at,
+            "url": url,
+        })),
+    )
+        .into_response()
+}
+
+async fn pairing_exchange(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Json(req): Json<PairingExchangeRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    let ttl = req.ttl_secs.unwrap_or(86_400);
+    match service.exchange_pairing(&req.token, ttl) {
+        Some(issued) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "access_token": issued.token,
+                "expires_at": issued.expires_at,
+            })),
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid token" })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct PairingQuery {
+    token: String,
+}
+
+async fn pairing_landing(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Query(query): Query<PairingQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    let issued = match service.exchange_pairing(&query.token, 86_400) {
+        Some(token) => token,
+        None => {
+            return (axum::http::StatusCode::BAD_REQUEST, "invalid pairing token").into_response();
+        }
+    };
+    let body = format!(
+        r#"<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Forgemux Pairing</title>
+  </head>
+  <body>
+    <p>Pairing successful. Redirecting...</p>
+    <script>
+      window.location.href = "/?token={token}";
+    </script>
+  </body>
+</html>"#,
+        token = issued.token
+    );
+    (
+        axum::http::StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
 }
 
 fn normalize_http_addr(addr: &str) -> String {
@@ -1030,6 +1147,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::UPGRADE_REQUIRED);
+    }
+
+    #[tokio::test]
+    async fn pairing_start_returns_token() {
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(HubService::new(HubConfig {
+            data_dir: tmp.path().join("hub"),
+            edges: Vec::new(),
+            tokens: Vec::new(),
+        }));
+        let app = Router::new()
+            .route("/pairing/start", post(pairing_start))
+            .with_state(service);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/pairing/start")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{\"ttl_secs\":60}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]
