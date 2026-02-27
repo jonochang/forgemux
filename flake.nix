@@ -8,9 +8,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
+    untangle.url = "github:jonochang/untangle";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils }:
+  outputs = { self, nixpkgs, rust-overlay, flake-utils, untangle }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -20,6 +21,7 @@
           extensions = [ "clippy" "rustfmt" "rust-src" ];
         };
         forgemuxPkg = pkgs.callPackage ./package.nix { };
+        untanglePkg = pkgs.callPackage "${untangle}/package.nix" { };
       in
       {
         packages.forgemux = forgemuxPkg;
@@ -28,6 +30,7 @@
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rustToolchain
+            untanglePkg
 
             # Native build dependencies
             pkgs.pkg-config
@@ -56,6 +59,12 @@
             OPENSSL_LIB_DIR = "${pkgs.openssl.out}/lib";
             OPENSSL_INCLUDE_DIR = "${pkgs.openssl.dev}/include";
           };
+
+          shellHook = ''
+            if git rev-parse --git-dir > /dev/null 2>&1; then
+              git config core.hooksPath .githooks
+            fi
+          '';
         };
       }
     );
