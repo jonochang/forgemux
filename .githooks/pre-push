@@ -3,3 +3,6 @@ set -euo pipefail
 
 echo "[pre-push] untangle analyze ./crates --lang rust"
 untangle analyze ./crates --lang rust
+
+echo "[pre-push] cargo test --workspace"
+cargo test --workspace
