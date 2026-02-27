@@ -387,7 +387,7 @@ async fn handle_ws<R: CommandRunner + 'static>(
         let payload = StreamMessage::Event {
             event_id: event.id,
             data: event.data,
-            durable: true,
+            durable: event.durable,
         };
         if socket
             .send(Message::Text(serde_json::to_string(&payload).unwrap()))
@@ -437,11 +437,11 @@ async fn handle_ws<R: CommandRunner + 'static>(
                 if let Ok(snapshot) = service.capture_output(&session_id, service.config().snapshot_lines)
                     && snapshot != last_snapshot
                 {
-                    let event = manager.push_event(&session_id, snapshot.clone());
+                    let event = manager.push_event(&session_id, snapshot.clone(), true);
                     let payload = StreamMessage::Event {
                         event_id: event.id,
                         data: event.data,
-                        durable: true,
+                        durable: event.durable,
                     };
                     if socket.send(Message::Text(serde_json::to_string(&payload).unwrap())).await.is_err() {
                         break;

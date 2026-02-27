@@ -42,6 +42,7 @@ pub struct StreamEvent {
     pub id: u64,
     pub data: String,
     pub at: DateTime<Utc>,
+    pub durable: bool,
 }
 
 #[derive(Debug)]
@@ -49,6 +50,7 @@ pub struct EventRing {
     capacity: usize,
     events: VecDeque<StreamEvent>,
     next_id: u64,
+    last_id: u64,
 }
 
 impl EventRing {
@@ -57,19 +59,24 @@ impl EventRing {
             capacity: capacity.max(1),
             events: VecDeque::new(),
             next_id: 1,
+            last_id: 0,
         }
     }
 
-    pub fn push(&mut self, data: String) -> StreamEvent {
+    pub fn push(&mut self, data: String, durable: bool) -> StreamEvent {
         let event = StreamEvent {
             id: self.next_id,
             data,
             at: Utc::now(),
+            durable,
         };
         self.next_id = self.next_id.saturating_add(1);
-        self.events.push_back(event.clone());
-        while self.events.len() > self.capacity {
-            self.events.pop_front();
+        self.last_id = event.id;
+        if durable {
+            self.events.push_back(event.clone());
+            while self.events.len() > self.capacity {
+                self.events.pop_front();
+            }
         }
         event
     }
@@ -83,7 +90,7 @@ impl EventRing {
     }
 
     pub fn latest_id(&self) -> u64 {
-        self.events.back().map(|e| e.id).unwrap_or(0)
+        self.last_id
     }
 }
 
@@ -141,14 +148,14 @@ impl StreamManager {
         }
     }
 
-    pub fn push_event(&self, session: &SessionId, data: String) -> StreamEvent {
+    pub fn push_event(&self, session: &SessionId, data: String, durable: bool) -> StreamEvent {
         let mut guard = self.inner.lock().unwrap();
         let state = guard.entry(session.clone()).or_insert_with(|| StreamState {
             ring: EventRing::new(self.ring_capacity),
             deduper: InputDeduper::new(self.dedup_window),
             last_snapshot: String::new(),
         });
-        state.ring.push(data)
+        state.ring.push(data, durable)
     }
 
     pub fn events_since(&self, session: &SessionId, last_seen: u64) -> Vec<StreamEvent> {
@@ -185,9 +192,9 @@ mod tests {
     #[test]
     fn event_ring_eviction_and_since() {
         let mut ring = EventRing::new(2);
-        ring.push("one".to_string());
-        let second = ring.push("two".to_string());
-        ring.push("three".to_string());
+        ring.push("one".to_string(), true);
+        let second = ring.push("two".to_string(), true);
+        ring.push("three".to_string(), true);
 
         let events = ring.since(second.id - 1);
         assert_eq!(events.len(), 2);
@@ -209,11 +216,24 @@ mod tests {
     fn stream_manager_tracks_events() {
         let manager = StreamManager::new(3, 5);
         let session = SessionId::from("S-1");
-        manager.push_event(&session, "hello".to_string());
-        manager.push_event(&session, "world".to_string());
+        manager.push_event(&session, "hello".to_string(), true);
+        manager.push_event(&session, "world".to_string(), true);
         let events = manager.events_since(&session, 0);
         assert_eq!(events.len(), 2);
         assert_eq!(manager.latest_event_id(&session), events[1].id);
+    }
+
+    #[test]
+    fn event_ring_skips_ephemeral_storage() {
+        let mut ring = EventRing::new(2);
+        ring.push("one".to_string(), true);
+        let ephemeral = ring.push("temp".to_string(), false);
+        ring.push("two".to_string(), true);
+        let events = ring.since(0);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].data, "one");
+        assert_eq!(events[1].data, "two");
+        assert_eq!(ring.latest_id(), ephemeral.id + 1);
     }
 
     #[test]
