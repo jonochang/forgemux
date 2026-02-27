@@ -5,6 +5,7 @@ use forgemux_core::{
     SessionStore, StateDetector, StateSignal, sort_sessions,
 };
 use regex::Regex;
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::fs::OpenOptions;
@@ -137,6 +138,7 @@ pub struct NotificationConfig {
     pub on_error: Vec<NotificationHook>,
     pub on_idle_timeout: Vec<NotificationHook>,
     pub debounce_secs: i64,
+    pub rate_limit_per_hour: u32,
 }
 
 #[derive(Clone)]
@@ -258,6 +260,7 @@ impl ForgedConfig {
                 on_error: Vec::new(),
                 on_idle_timeout: Vec::new(),
                 debounce_secs: 300,
+                rate_limit_per_hour: 60,
             },
             node_id: None,
             hub_url: None,
@@ -391,6 +394,7 @@ struct NotificationConfigFile {
     pub on_error: Option<Vec<NotificationHookFile>>,
     pub on_idle_timeout: Option<Vec<NotificationHookFile>>,
     pub debounce_secs: Option<i64>,
+    pub rate_limit_per_hour: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -414,6 +418,7 @@ impl From<NotificationConfigFile> for NotificationConfig {
             on_error: convert_hooks(file.on_error),
             on_idle_timeout: convert_hooks(file.on_idle_timeout),
             debounce_secs: file.debounce_secs.unwrap_or(300),
+            rate_limit_per_hour: file.rate_limit_per_hour.unwrap_or(60),
         }
     }
 }
@@ -1245,6 +1250,7 @@ impl Default for WorktreeSpec {
 #[derive(Default)]
 pub struct NotificationEngine {
     last_fired: std::sync::Mutex<HashMap<(String, NotificationEvent), DateTime<Utc>>>,
+    rate_limit: std::sync::Mutex<HashMap<String, VecDeque<DateTime<Utc>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1279,6 +1285,9 @@ impl NotificationEngine {
         };
 
         if !self.should_fire(session, event, config.debounce_secs) {
+            return;
+        }
+        if !self.should_rate_limit(session, config.rate_limit_per_hour) {
             return;
         }
 
@@ -1316,6 +1325,27 @@ impl NotificationEngine {
             return false;
         }
         guard.insert(key, now);
+        true
+    }
+
+    fn should_rate_limit(&self, session: &SessionRecord, limit_per_hour: u32) -> bool {
+        if limit_per_hour == 0 {
+            return false;
+        }
+        let now = Utc::now();
+        let window_start = now - chrono::Duration::hours(1);
+        let mut guard = self.rate_limit.lock().unwrap();
+        let entry = guard.entry(session.id.as_str().to_string()).or_default();
+        while let Some(front) = entry.front() {
+            if *front >= window_start {
+                break;
+            }
+            entry.pop_front();
+        }
+        if entry.len() as u32 >= limit_per_hour {
+            return false;
+        }
+        entry.push_back(now);
         true
     }
 }
@@ -1595,6 +1625,47 @@ mod tests {
             on_error: vec![],
             on_idle_timeout: vec![],
             debounce_secs: 60,
+            rate_limit_per_hour: 1,
+        };
+
+        let runner = FakeRunner::default();
+        engine.maybe_notify(
+            &config,
+            &runner,
+            tmp.path(),
+            &record,
+            &SessionState::WaitingInput,
+            None,
+        );
+        engine.maybe_notify(
+            &config,
+            &runner,
+            tmp.path(),
+            &record,
+            &SessionState::WaitingInput,
+            None,
+        );
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn notification_engine_rate_limits() {
+        let engine = NotificationEngine::new();
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", PathBuf::from("/tmp"));
+        record.id = forgemux_core::SessionId::from("S-0005");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let config = NotificationConfig {
+            on_waiting_input: vec![NotificationHook::Command {
+                program: "echo".to_string(),
+                args: vec!["hi".to_string()],
+            }],
+            on_error: vec![],
+            on_idle_timeout: vec![],
+            debounce_secs: 0,
+            rate_limit_per_hour: 1,
         };
 
         let runner = FakeRunner::default();
@@ -1650,6 +1721,7 @@ mod tests {
             on_error: vec![],
             on_idle_timeout: vec![],
             debounce_secs: 0,
+            rate_limit_per_hour: 60,
         };
 
         let runner = FakeRunner::default();
@@ -1682,6 +1754,7 @@ mod tests {
             on_error: vec![],
             on_idle_timeout: vec![],
             debounce_secs: 0,
+            rate_limit_per_hour: 60,
         };
 
         let runner = FakeRunner::default();
@@ -1725,6 +1798,7 @@ mod tests {
             on_error: vec![],
             on_idle_timeout: vec![],
             debounce_secs: 0,
+            rate_limit_per_hour: 60,
         };
 
         let runner = FakeRunner::default();
@@ -2043,6 +2117,7 @@ prompt_patterns = ["(?m)^>$"]
 
 [notifications]
 debounce_secs = 42
+rate_limit_per_hour = 5
 
 [[notifications.on_waiting_input]]
 kind = "desktop"
@@ -2078,6 +2153,7 @@ args = ["session={{session_id}}"]
         );
         assert_eq!(claude.prompt_patterns, vec!["(?m)^>$".to_string()]);
         assert_eq!(config.notifications.debounce_secs, 42);
+        assert_eq!(config.notifications.rate_limit_per_hour, 5);
         assert_eq!(config.notifications.on_waiting_input.len(), 1);
         assert_eq!(config.notifications.on_error.len(), 1);
     }
