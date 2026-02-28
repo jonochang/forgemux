@@ -29,7 +29,7 @@ function riskFromState(state) {
   return "green";
 }
 
-export function FleetDashboard({ sessions, workspace = fallbackWorkspace }) {
+export function FleetDashboard({ sessions, workspace = fallbackWorkspace, onSelectSession, loading = false }) {
   const active = sessions.filter((s) => (s.state || "").toLowerCase() === "running").length;
   const blocked = sessions.filter((s) => (s.state || "").toLowerCase() === "waitinginput").length;
   const errored = sessions.filter((s) => (s.state || "").toLowerCase() === "errored").length;
@@ -42,13 +42,20 @@ export function FleetDashboard({ sessions, workspace = fallbackWorkspace }) {
       <${Card}><${SectionLabel}>Total</${SectionLabel}><div style=${{ fontSize: "28px", marginTop: "8px" }}>${sessions.length}</div></${Card}>
     </div>
 
+    ${loading && html`<div style=${{ color: T.t3, marginTop: "16px" }}>Loading sessions...</div>`}
+    ${!loading && sessions.length === 0 &&
+    html`<div style=${{ color: T.t3, marginTop: "16px" }}>No active sessions.</div>`}
+
     <div style=${{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px" }}>
       ${sessions.map((session) => {
         const risk = riskFromState(session.state);
         const stateLabel = statusLabel(session.state);
         const repos = [repoFromPath(session.repo_root)];
         const contextPct = session.context_pct || 0;
-        return html`<${Card} style=${{ border: `1px solid ${riskColor(risk)}` }}>
+        return html`<${Card}
+          style=${{ border: `1px solid ${riskColor(risk)}`, cursor: onSelectSession ? "pointer" : "default" }}
+          onClick=${() => onSelectSession?.(session.id)}
+        >
           <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div style=${{ display: "flex", alignItems: "center", gap: "10px" }}>
               <${Dot} color=${riskColor(risk)} size=${10} pulse=${risk === "red"} />

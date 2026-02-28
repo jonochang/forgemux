@@ -1,4 +1,4 @@
-import { useState } from "../lib/hooks.module.js";
+import { useEffect, useState } from "../lib/hooks.module.js";
 import { html, Card, Badge, RepoPill, Dot, severityColor } from "./shared.js";
 import { T } from "../theme.js";
 import { filterByRepo, formatAge, sortDecisions } from "./decision_utils.js";
@@ -58,7 +58,7 @@ ${context.lines
   return null;
 }
 
-export function DecisionQueue({ decisions, workspace, reviewer, onAction }) {
+export function DecisionQueue({ decisions, workspace, reviewer, onAction, onSelectSession, hotkeyAction, loading = false }) {
   const [expandedId, setExpandedId] = useState(null);
   const [repoFilter, setRepoFilter] = useState("all");
   const [commentingId, setCommentingId] = useState(null);
@@ -66,6 +66,26 @@ export function DecisionQueue({ decisions, workspace, reviewer, onAction }) {
 
   const sorted = sortDecisions(decisions || []);
   const filtered = filterByRepo(sorted, repoFilter);
+
+  useEffect(() => {
+    if (!hotkeyAction) return;
+    if (hotkeyAction.type === "escape") {
+      setExpandedId(null);
+      setCommentingId(null);
+      setCommentText("");
+      return;
+    }
+    const target = filtered[0];
+    if (!target) return;
+    if (hotkeyAction.type === "approve") {
+      onAction(target.id, "approve");
+    } else if (hotkeyAction.type === "deny") {
+      onAction(target.id, "deny");
+    } else if (hotkeyAction.type === "comment") {
+      setCommentingId(target.id);
+      setExpandedId(target.id);
+    }
+  }, [hotkeyAction, filtered, onAction]);
 
   const handleComment = async (id) => {
     if (!commentText.trim()) return;
@@ -84,6 +104,10 @@ export function DecisionQueue({ decisions, workspace, reviewer, onAction }) {
       <${RepoFilterBar} repos=${workspace.repos || []} active=${repoFilter} onChange=${setRepoFilter} />
     </div>
 
+    ${loading && html`<div style=${{ color: T.t3 }}>Loading decisions...</div>`}
+    ${!loading && filtered.length === 0 &&
+    html`<div style=${{ color: T.t3 }}>No pending decisions.</div>`}
+
     <div style=${{ display: "grid", gap: "14px" }}>
       ${filtered.map((d) => {
         const expanded = expandedId === d.id;
@@ -99,7 +123,25 @@ export function DecisionQueue({ decisions, workspace, reviewer, onAction }) {
                 <${Dot} color=${sevColor} size=${10} pulse=${d.severity === "critical"} />
                 <div>
                   <div style=${{ fontWeight: 600 }}>${d.question}</div>
-                  <div style=${{ fontSize: "12px", color: T.t3 }}>${d.id} · ${age} · ${d.repo_id}</div>
+                  <div style=${{ fontSize: "12px", color: T.t3 }}>
+                    <span style=${{ fontFamily: T.mono }}>${d.id}</span> · ${age} · ${d.repo_id}
+                    ${d.session_id &&
+                    html` · <button
+                      onClick=${(e) => {
+                        e.stopPropagation();
+                        onSelectSession?.(d.session_id);
+                      }}
+                      style=${{
+                        background: "transparent",
+                        border: "none",
+                        color: T.info,
+                        cursor: "pointer",
+                        fontSize: "12px",
+                        padding: 0,
+                        fontFamily: T.mono,
+                      }}
+                    >${d.session_id}</button>`}
+                  </div>
                 </div>
               </div>
               <${Badge} color=${sevColor} bg=${T.bg3}>${d.severity}</${Badge}>

@@ -56,6 +56,8 @@ export function SessionReplay({ session, workspace, events, tab, onTabChange, di
 
       <div style=${{ flex: 1, overflowY: "auto", padding: "12px 0" }}>
         <div style=${{ padding: "0 16px 8px" }}><${SectionLabel}>Timeline</${SectionLabel}></div>
+        ${(events || []).length === 0 &&
+        html`<div style=${{ padding: "0 16px", color: T.t3 }}>No replay data yet.</div>`}
         ${(events || []).map((evt, idx) => {
           const repo = evt.repo_id ? repoMap.get(evt.repo_id) : null;
           const color = eventColor(evt.event_type);

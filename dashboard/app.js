@@ -28,6 +28,8 @@ function App() {
   const [view, setView] = useHashRoute();
   const [sessions, setSessions] = useState([]);
   const [decisions, setDecisions] = useState([]);
+  const [loadingSessions, setLoadingSessions] = useState(true);
+  const [loadingDecisions, setLoadingDecisions] = useState(true);
   const [connection, setConnection] = useState("connecting");
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("forgemux_reviewer") || "Operator");
   const [replaySessionId, setReplaySessionId] = useState(null);
@@ -35,10 +37,15 @@ function App() {
   const [replayDiff, setReplayDiff] = useState(null);
   const [replayTerminal, setReplayTerminal] = useState(null);
   const [replayTab, setReplayTab] = useState("diff");
+  const [hotkeyAction, setHotkeyAction] = useState(null);
   const workspace = baseWorkspace;
 
   useEffect(() => {
-    api.sessions().then(setSessions).catch(() => setSessions([]));
+    api
+      .sessions()
+      .then(setSessions)
+      .catch(() => setSessions([]))
+      .finally(() => setLoadingSessions(false));
     const stop = connectWS("/sessions/ws", {
       onMessage: (data) => {
         try {
@@ -54,7 +61,11 @@ function App() {
   }, []);
 
   useEffect(() => {
-    api.decisions(workspace.id).then(setDecisions).catch(() => setDecisions([]));
+    api
+      .decisions(workspace.id)
+      .then(setDecisions)
+      .catch(() => setDecisions([]))
+      .finally(() => setLoadingDecisions(false));
     const stop = connectWS(`/decisions/ws?workspace_id=${encodeURIComponent(workspace.id)}`, {
       onMessage: (data) => {
         try {
@@ -82,6 +93,33 @@ function App() {
   }, [reviewer]);
 
   const pendingCount = useMemo(() => decisions.length, [decisions.length]);
+
+  useEffect(() => {
+    const handleKey = (event) => {
+      const tag = document.activeElement?.tagName?.toLowerCase();
+      if (tag === "input" || tag === "textarea") return;
+      if (event.key === "1") {
+        setView("fleet");
+        return;
+      }
+      if (event.key === "2") {
+        setView("decisions");
+        return;
+      }
+      if (event.key === "3") {
+        setView("replay");
+        return;
+      }
+      if (view === "decisions") {
+        if (event.key === "a") setHotkeyAction({ type: "approve", ts: Date.now() });
+        if (event.key === "d") setHotkeyAction({ type: "deny", ts: Date.now() });
+        if (event.key === "c") setHotkeyAction({ type: "comment", ts: Date.now() });
+        if (event.key === "Escape") setHotkeyAction({ type: "escape", ts: Date.now() });
+      }
+    };
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [view, setView]);
 
   const handleDecisionAction = async (decisionId, action, comment) => {
     const payload = { reviewer, comment };
@@ -127,15 +165,29 @@ function App() {
     [sessions, replaySessionId]
   );
 
+  const selectSession = (id) => {
+    setReplaySessionId(id);
+    setView("replay");
+  };
+
   return html`<div>
     <${TopNav} view=${view} onViewChange=${setView} pendingCount=${pendingCount} connection=${connection} />
-    ${view === "fleet" && html`<${FleetDashboard} sessions=${sessions} workspace=${workspace} />`}
+    ${view === "fleet" &&
+    html`<${FleetDashboard}
+      sessions=${sessions}
+      workspace=${workspace}
+      onSelectSession=${selectSession}
+      loading=${loadingSessions}
+    />`}
     ${view === "decisions" &&
     html`<${DecisionQueue}
       decisions=${decisions}
       workspace=${workspace}
       reviewer=${reviewer}
       onAction=${handleDecisionAction}
+      onSelectSession=${selectSession}
+      hotkeyAction=${hotkeyAction}
+      loading=${loadingDecisions}
     />`}
     ${view === "replay" &&
     html`<${SessionReplay}
