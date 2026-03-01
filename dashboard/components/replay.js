@@ -27,7 +27,16 @@ function formatTime(evt) {
   return "";
 }
 
-export function SessionReplay({ session, workspace, events, tab, onTabChange, diff, terminal }) {
+export function SessionReplay({
+  session,
+  workspace,
+  events,
+  tab,
+  onTabChange,
+  diff,
+  terminal,
+  error = null,
+}) {
   const repoMap = useMemo(() => {
     const map = new Map();
     (workspace.repos || []).forEach((repo) => map.set(repo.id, repo));
@@ -56,7 +65,9 @@ export function SessionReplay({ session, workspace, events, tab, onTabChange, di
 
       <div style=${{ flex: 1, overflowY: "auto", padding: "12px 0" }}>
         <div style=${{ padding: "0 16px 8px" }}><${SectionLabel}>Timeline</${SectionLabel}></div>
-        ${(events || []).length === 0 &&
+        ${error &&
+        html`<div style=${{ padding: "0 16px", color: T.err }}>Failed to load replay data.</div>`}
+        ${(events || []).length === 0 && !error &&
         html`<div style=${{ padding: "0 16px", color: T.t3 }}>No replay data yet.</div>`}
         ${(events || []).map((evt, idx) => {
           const repo = evt.repo_id ? repoMap.get(evt.repo_id) : null;

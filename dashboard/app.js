@@ -30,6 +30,9 @@ function App() {
   const [decisions, setDecisions] = useState([]);
   const [loadingSessions, setLoadingSessions] = useState(true);
   const [loadingDecisions, setLoadingDecisions] = useState(true);
+  const [sessionsError, setSessionsError] = useState(false);
+  const [decisionsError, setDecisionsError] = useState(false);
+  const [replayError, setReplayError] = useState(false);
   const [connection, setConnection] = useState("connecting");
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("forgemux_reviewer") || "Operator");
   const [replaySessionId, setReplaySessionId] = useState(null);
@@ -43,8 +46,14 @@ function App() {
   useEffect(() => {
     api
       .sessions()
-      .then(setSessions)
-      .catch(() => setSessions([]))
+      .then((data) => {
+        setSessions(data);
+        setSessionsError(false);
+      })
+      .catch(() => {
+        setSessions([]);
+        setSessionsError(true);
+      })
       .finally(() => setLoadingSessions(false));
     const stop = connectWS("/sessions/ws", {
       onMessage: (data) => {
@@ -63,8 +72,14 @@ function App() {
   useEffect(() => {
     api
       .decisions(workspace.id)
-      .then(setDecisions)
-      .catch(() => setDecisions([]))
+      .then((data) => {
+        setDecisions(data);
+        setDecisionsError(false);
+      })
+      .catch(() => {
+        setDecisions([]);
+        setDecisionsError(true);
+      })
       .finally(() => setLoadingDecisions(false));
     const stop = connectWS(`/decisions/ws?workspace_id=${encodeURIComponent(workspace.id)}`, {
       onMessage: (data) => {
@@ -146,18 +161,28 @@ function App() {
 
   useEffect(() => {
     if (view !== "replay" || !replaySessionId) return;
+    setReplayError(false);
     api
       .replayTimeline(replaySessionId)
       .then((data) => setReplayEvents(data.events || []))
-      .catch(() => setReplayEvents([]));
+      .catch(() => {
+        setReplayEvents([]);
+        setReplayError(true);
+      });
     api
       .replayDiff(replaySessionId)
       .then(setReplayDiff)
-      .catch(() => setReplayDiff(null));
+      .catch(() => {
+        setReplayDiff(null);
+        setReplayError(true);
+      });
     api
       .replayTerminal(replaySessionId)
       .then(setReplayTerminal)
-      .catch(() => setReplayTerminal(null));
+      .catch(() => {
+        setReplayTerminal(null);
+        setReplayError(true);
+      });
   }, [view, replaySessionId]);
 
   const selectedSession = useMemo(
@@ -178,6 +203,7 @@ function App() {
       workspace=${workspace}
       onSelectSession=${selectSession}
       loading=${loadingSessions}
+      error=${sessionsError}
     />`}
     ${view === "decisions" &&
     html`<${DecisionQueue}
@@ -188,6 +214,7 @@ function App() {
       onSelectSession=${selectSession}
       hotkeyAction=${hotkeyAction}
       loading=${loadingDecisions}
+      error=${decisionsError}
     />`}
     ${view === "replay" &&
     html`<${SessionReplay}
@@ -198,6 +225,7 @@ function App() {
       onTabChange=${setReplayTab}
       diff=${replayDiff}
       terminal=${replayTerminal}
+      error=${replayError}
     />`}
   </div>`;
 }

@@ -29,7 +29,13 @@ function riskFromState(state) {
   return "green";
 }
 
-export function FleetDashboard({ sessions, workspace = fallbackWorkspace, onSelectSession, loading = false }) {
+export function FleetDashboard({
+  sessions,
+  workspace = fallbackWorkspace,
+  onSelectSession,
+  loading = false,
+  error = null,
+}) {
   const active = sessions.filter((s) => (s.state || "").toLowerCase() === "running").length;
   const blocked = sessions.filter((s) => (s.state || "").toLowerCase() === "waitinginput").length;
   const errored = sessions.filter((s) => (s.state || "").toLowerCase() === "errored").length;
@@ -43,7 +49,8 @@ export function FleetDashboard({ sessions, workspace = fallbackWorkspace, onSele
     </div>
 
     ${loading && html`<div style=${{ color: T.t3, marginTop: "16px" }}>Loading sessions...</div>`}
-    ${!loading && sessions.length === 0 &&
+    ${error && html`<div style=${{ color: T.err, marginTop: "16px" }}>Failed to load sessions.</div>`}
+    ${!loading && !error && sessions.length === 0 &&
     html`<div style=${{ color: T.t3, marginTop: "16px" }}>No active sessions.</div>`}
 
     <div style=${{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px" }}>

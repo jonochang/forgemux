@@ -58,7 +58,16 @@ ${context.lines
   return null;
 }
 
-export function DecisionQueue({ decisions, workspace, reviewer, onAction, onSelectSession, hotkeyAction, loading = false }) {
+export function DecisionQueue({
+  decisions,
+  workspace,
+  reviewer,
+  onAction,
+  onSelectSession,
+  hotkeyAction,
+  loading = false,
+  error = null,
+}) {
   const [expandedId, setExpandedId] = useState(null);
   const [repoFilter, setRepoFilter] = useState("all");
   const [commentingId, setCommentingId] = useState(null);
@@ -105,7 +114,8 @@ export function DecisionQueue({ decisions, workspace, reviewer, onAction, onSele
     </div>
 
     ${loading && html`<div style=${{ color: T.t3 }}>Loading decisions...</div>`}
-    ${!loading && filtered.length === 0 &&
+    ${error && html`<div style=${{ color: T.err }}>Failed to load decisions.</div>`}
+    ${!loading && !error && filtered.length === 0 &&
     html`<div style=${{ color: T.t3 }}>No pending decisions.</div>`}
 
     <div style=${{ display: "grid", gap: "14px" }}>
