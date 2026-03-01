@@ -201,6 +201,11 @@ function App() {
     setView("replay");
   };
 
+  const attachSession = (id) => {
+    setAttachSessionId(id);
+    setView("attach");
+  };
+
   return html`<div>
     <${TopNav} view=${view} onViewChange=${setView} pendingCount=${pendingCount} connection=${connection} />
     ${view === "fleet" &&
@@ -208,6 +213,7 @@ function App() {
       sessions=${sessions}
       workspace=${workspace}
       onSelectSession=${selectSession}
+      onAttachSession=${attachSession}
       loading=${loadingSessions}
       error=${sessionsError}
     />`}

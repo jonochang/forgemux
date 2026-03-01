@@ -29,32 +29,44 @@ function riskFromState(state) {
   return "green";
 }
 
+const TERMINAL_STATES = new Set(["terminated", "errored", "unreachable"]);
+const STALE_MS = 3 * 24 * 60 * 60 * 1000; // 3 days
+
+function isStaleTerminal(session) {
+  const state = (session.state || "").toLowerCase();
+  if (!TERMINAL_STATES.has(state)) return false;
+  const updated = session.updated_at ? new Date(session.updated_at).getTime() : 0;
+  return Date.now() - updated > STALE_MS;
+}
+
 export function FleetDashboard({
   sessions,
   workspace = fallbackWorkspace,
   onSelectSession,
+  onAttachSession,
   loading = false,
   error = null,
 }) {
-  const active = sessions.filter((s) => (s.state || "").toLowerCase() === "running").length;
-  const blocked = sessions.filter((s) => (s.state || "").toLowerCase() === "waitinginput").length;
-  const errored = sessions.filter((s) => (s.state || "").toLowerCase() === "errored").length;
+  const visible = sessions.filter((s) => !isStaleTerminal(s));
+  const active = visible.filter((s) => (s.state || "").toLowerCase() === "running").length;
+  const blocked = visible.filter((s) => (s.state || "").toLowerCase() === "waitinginput").length;
+  const errored = visible.filter((s) => (s.state || "").toLowerCase() === "errored").length;
 
   return html`<div style=${{ padding: "28px" }}>
     <div style=${{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: "16px", marginBottom: "20px" }}>
       <${Card}><${SectionLabel}>Active</${SectionLabel}><div style=${{ fontSize: "28px", marginTop: "8px" }}>${active}</div></${Card}>
       <${Card}><${SectionLabel}>Waiting</${SectionLabel}><div style=${{ fontSize: "28px", marginTop: "8px" }}>${blocked}</div></${Card}>
       <${Card}><${SectionLabel}>Errored</${SectionLabel}><div style=${{ fontSize: "28px", marginTop: "8px" }}>${errored}</div></${Card}>
-      <${Card}><${SectionLabel}>Total</${SectionLabel}><div style=${{ fontSize: "28px", marginTop: "8px" }}>${sessions.length}</div></${Card}>
+      <${Card}><${SectionLabel}>Total</${SectionLabel}><div style=${{ fontSize: "28px", marginTop: "8px" }}>${visible.length}</div></${Card}>
     </div>
 
     ${loading && html`<div style=${{ color: T.t3, marginTop: "16px" }}>Loading sessions...</div>`}
     ${error && html`<div style=${{ color: T.err, marginTop: "16px" }}>Failed to load sessions.</div>`}
-    ${!loading && !error && sessions.length === 0 &&
+    ${!loading && !error && visible.length === 0 &&
     html`<div style=${{ color: T.t3, marginTop: "16px" }}>No active sessions.</div>`}
 
     <div style=${{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: "16px" }}>
-      ${sessions.map((session) => {
+      ${visible.map((session) => {
         const risk = riskFromState(session.state);
         const stateLabel = statusLabel(session.state);
         const repos = [repoFromPath(session.repo_root)];
@@ -82,6 +94,12 @@ export function FleetDashboard({
               <span>${contextPct}%</span>
             </div>
             <${MiniBar} value=${contextPct} max=${100} color=${contextColor(contextPct)} />
+          </div>
+          <div style=${{ display: "flex", gap: "12px", marginTop: "12px", borderTop: `1px solid ${T.bg3}`, paddingTop: "10px" }}>
+            <a href="#" style=${{ fontSize: "12px", color: T.t3, textDecoration: "none" }}
+              onClick=${(e) => { e.preventDefault(); e.stopPropagation(); onSelectSession?.(session.id); }}>Replay</a>
+            <a href="#" style=${{ fontSize: "12px", color: T.t3, textDecoration: "none" }}
+              onClick=${(e) => { e.preventDefault(); e.stopPropagation(); onAttachSession?.(session.id); }}>Attach</a>
           </div>
         </${Card}>`;
       })}
