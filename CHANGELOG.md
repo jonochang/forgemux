@@ -1,9 +1,11 @@
 # Changelog
 
-## 0.1.14 - 2026-02-27
+## 0.1.15 - 2026-03-01
 
-- Add replay event types and hub replay timeline endpoint.
-- Add session replay dashboard view and forged replay JSONL logging.
+- Add Session tab creation form with forged instance selection and default repo loading.
+- Wire replay diff proxy and add file tree/Atomic Merge placeholders.
+- Fix risk threshold boundary and add property + frontend utility tests.
+- Add hub tracing instrumentation and decision flow integration tests.
 
 ## 0.1.13 - 2026-02-27
 
