@@ -702,7 +702,7 @@ async fn heartbeat(
 async fn start_session(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
-    Json(payload): Json<serde_json::Value>,
+    Json(mut payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     if let Some(resp) = check_version(&headers) {
         return resp;
@@ -714,12 +714,37 @@ async fn start_session(
         )
             .into_response();
     }
-    let Some(edge) = service.pick_edge() else {
-        return (
-            axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({ "error": "no edges registered" })),
-        )
-            .into_response();
+    let edge_id = payload
+        .get("edge_id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("edge_id");
+    }
+    let edge = if let Some(edge_id) = edge_id {
+        service
+            .list_registered_edges()
+            .into_iter()
+            .find(|edge| edge.id == edge_id)
+            .ok_or_else(|| {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": "unknown edge" })),
+                )
+                    .into_response()
+            })
+    } else {
+        service.pick_edge().ok_or_else(|| {
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({ "error": "no edges registered" })),
+            )
+                .into_response()
+        })
+    };
+    let edge = match edge {
+        Ok(edge) => edge,
+        Err(resp) => return resp,
     };
     let url = format!("{}/sessions/start", normalize_http_addr(&edge.addr));
     match reqwest::Client::new().post(url).json(&payload).send().await {
@@ -1964,6 +1989,72 @@ mod tests {
             .and_then(|value| value.as_str())
             .unwrap();
         assert_eq!(repo, "repo-1");
+    }
+
+    #[tokio::test]
+    async fn start_session_respects_edge_id() {
+        let edge_app_a = Router::new().route(
+            "/sessions/start",
+            post(|| async { Json(serde_json::json!({ "session_id": "S-A" })) }),
+        );
+        let edge_app_b = Router::new().route(
+            "/sessions/start",
+            post(|| async { Json(serde_json::json!({ "session_id": "S-B" })) }),
+        );
+
+        let listener_a = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = listener_a.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener_a, edge_app_a).await.unwrap();
+        });
+
+        let listener_b = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = listener_b.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener_b, edge_app_b).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
+        service.register_edge("edge-a".to_string(), addr_a.to_string());
+        service.register_edge("edge-b".to_string(), addr_b.to_string());
+
+        let app = Router::new()
+            .route("/sessions", post(start_session))
+            .with_state(service);
+
+        let payload = serde_json::json!({
+            "edge_id": "edge-b",
+            "agent": "claude",
+            "model": "sonnet",
+            "repo": "/tmp",
+            "worktree": false
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.get("session_id").and_then(|v| v.as_str()), Some("S-B"));
     }
 
     #[test]

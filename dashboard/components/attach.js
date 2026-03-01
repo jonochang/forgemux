@@ -2,16 +2,40 @@ import { useEffect, useRef, useState, useCallback } from "../lib/hooks.module.js
 import { html, Dot, Badge, SectionLabel, statusColor } from "./shared.js";
 import { T } from "../theme.js";
 import { ansiToHtml } from "../lib/ansi.js";
+import { api } from "../services/api.js";
 
 export function AttachView({ sessions, initialSessionId }) {
   const [selectedId, setSelectedId] = useState(initialSessionId || null);
   const [content, setContent] = useState("");
   const [attachStatus, setAttachStatus] = useState("disconnected");
   const [inputText, setInputText] = useState("");
+  const [edges, setEdges] = useState([]);
+  const [edgeId, setEdgeId] = useState("");
+  const [agent, setAgent] = useState("claude");
+  const [model, setModel] = useState("sonnet");
+  const [repo, setRepo] = useState("");
+  const [worktree, setWorktree] = useState(false);
+  const [branch, setBranch] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
   const wsRef = useRef(null);
   const sessionIdRef = useRef(null);
   const pendingInputsRef = useRef([]);
   const terminalRef = useRef(null);
+
+  useEffect(() => {
+    api
+      .edges()
+      .then((data) => {
+        setEdges(data || []);
+        if (!edgeId && data && data.length > 0) {
+          setEdgeId(data[0].id);
+        }
+      })
+      .catch(() => {
+        setEdges([]);
+      });
+  }, [edgeId]);
 
   const flushPending = useCallback(() => {
     const ws = wsRef.current;
@@ -119,6 +143,40 @@ export function AttachView({ sessions, initialSessionId }) {
     setInputText("");
   }, [inputText]);
 
+  const startSession = useCallback(async () => {
+    setCreateError("");
+    if (!edgeId) {
+      setCreateError("Select a forged instance.");
+      return;
+    }
+    if (!repo.trim()) {
+      setCreateError("Repo path is required.");
+      return;
+    }
+    setCreating(true);
+    try {
+      const payload = {
+        edge_id: edgeId,
+        agent,
+        model,
+        repo: repo.trim(),
+        worktree,
+        branch: worktree && branch.trim() ? branch.trim() : null,
+      };
+      const response = await api.startSession(payload);
+      const sessionId = response.session_id || response.id;
+      if (sessionId) {
+        selectSession(sessionId);
+      } else {
+        setCreateError("Session created but no session id returned.");
+      }
+    } catch (err) {
+      setCreateError(err?.message || "Failed to start session.");
+    } finally {
+      setCreating(false);
+    }
+  }, [edgeId, agent, model, repo, worktree, branch, selectSession]);
+
   const handleKeyDown = useCallback(
     (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -147,6 +205,107 @@ export function AttachView({ sessions, initialSessionId }) {
         flexDirection: "column",
       }}
     >
+      <div style=${{ padding: "12px 16px", borderBottom: `1px solid ${T.border}` }}>
+        <${SectionLabel}>Start Session</${SectionLabel}>
+        <div style=${{ display: "grid", gap: "8px", marginTop: "10px" }}>
+          <select
+            value=${edgeId}
+            onChange=${(e) => setEdgeId(e.target.value)}
+            style=${{
+              background: T.bg2,
+              border: `1px solid ${T.border}`,
+              color: T.t1,
+              padding: "6px 8px",
+              borderRadius: "6px",
+              fontSize: "12px",
+            }}
+          >
+            ${edges.length === 0 &&
+            html`<option value="">No forged instances</option>`}
+            ${edges.map(
+              (edge) =>
+                html`<option value=${edge.id}>${edge.id} (${edge.addr || "registered"})</option>`
+            )}
+          </select>
+          <select
+            value=${agent}
+            onChange=${(e) => setAgent(e.target.value)}
+            style=${{
+              background: T.bg2,
+              border: `1px solid ${T.border}`,
+              color: T.t1,
+              padding: "6px 8px",
+              borderRadius: "6px",
+              fontSize: "12px",
+            }}
+          >
+            <option value="claude">Claude</option>
+            <option value="codex">Codex</option>
+          </select>
+          <input
+            value=${model}
+            onInput=${(e) => setModel(e.target.value)}
+            placeholder="Model"
+            style=${{
+              background: T.bg2,
+              border: `1px solid ${T.border}`,
+              color: T.t1,
+              padding: "6px 8px",
+              borderRadius: "6px",
+              fontSize: "12px",
+            }}
+          />
+          <input
+            value=${repo}
+            onInput=${(e) => setRepo(e.target.value)}
+            placeholder="Repo path"
+            style=${{
+              background: T.bg2,
+              border: `1px solid ${T.border}`,
+              color: T.t1,
+              padding: "6px 8px",
+              borderRadius: "6px",
+              fontSize: "12px",
+            }}
+          />
+          <label style=${{ display: "flex", gap: "6px", alignItems: "center", fontSize: "11px", color: T.t2 }}>
+            <input type="checkbox" checked=${worktree} onChange=${(e) => setWorktree(e.target.checked)} />
+            Create worktree
+          </label>
+          ${worktree &&
+          html`<input
+            value=${branch}
+            onInput=${(e) => setBranch(e.target.value)}
+            placeholder="Branch name"
+            style=${{
+              background: T.bg2,
+              border: `1px solid ${T.border}`,
+              color: T.t1,
+              padding: "6px 8px",
+              borderRadius: "6px",
+              fontSize: "12px",
+            }}
+          />`}
+          ${createError &&
+          html`<div style=${{ color: T.err, fontSize: "11px" }}>${createError}</div>`}
+          <button
+            onClick=${startSession}
+            disabled=${creating || edges.length === 0}
+            style=${{
+              background: T.ember,
+              color: "#fff",
+              border: "none",
+              borderRadius: "6px",
+              padding: "8px 10px",
+              fontSize: "12px",
+              cursor: creating || edges.length === 0 ? "default" : "pointer",
+              opacity: creating || edges.length === 0 ? 0.5 : 1,
+            }}
+          >
+            ${creating ? "Starting..." : "Start session"}
+          </button>
+        </div>
+      </div>
       <div style=${{ padding: "12px 16px", borderBottom: `1px solid ${T.border}` }}>
         <${SectionLabel}>Sessions</${SectionLabel}>
       </div>

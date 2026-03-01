@@ -19,6 +19,15 @@ export const api = {
   sessions() {
     return fetchJSON("/sessions");
   },
+  edges() {
+    return fetchJSON("/edges");
+  },
+  startSession(payload) {
+    return fetchJSON("/sessions", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+  },
   decisions(workspaceId) {
     const qs = new URLSearchParams({ workspace_id: workspaceId });
     return fetchJSON(`/decisions?${qs.toString()}`);
