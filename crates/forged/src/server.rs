@@ -65,6 +65,7 @@ pub struct DecisionResponseRequest {
 pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>) -> Router {
     Router::new()
         .route("/health", get(health))
+        .route("/config", get(config_summary::<R>))
         .route("/metrics", get(metrics::<R>))
         .route("/sessions", get(list_sessions::<R>))
         .route("/sessions/start", post(start_session::<R>))
@@ -86,6 +87,40 @@ pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>)
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "status": "healthy" }))
+}
+
+#[derive(Debug, Serialize)]
+struct ConfigSummary {
+    default_repo: Option<String>,
+}
+
+async fn config_summary<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+) -> Result<Json<ConfigSummary>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
+    Ok(Json(ConfigSummary {
+        default_repo: service
+            .config()
+            .default_repo
+            .as_ref()
+            .map(|path| path.to_string_lossy().to_string()),
+    }))
 }
 
 async fn metrics<R: CommandRunner + 'static>(

@@ -14,10 +14,11 @@ export function AttachView({ sessions, initialSessionId }) {
   const [agent, setAgent] = useState("claude");
   const [model, setModel] = useState("sonnet");
   const [repo, setRepo] = useState("");
-  const [worktree, setWorktree] = useState(false);
-  const [branch, setBranch] = useState("");
+  const [worktree, setWorktree] = useState(true);
+  const [branch, setBranch] = useState("main");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
+  const [repoTouched, setRepoTouched] = useState(false);
   const wsRef = useRef(null);
   const sessionIdRef = useRef(null);
   const pendingInputsRef = useRef([]);
@@ -36,6 +37,20 @@ export function AttachView({ sessions, initialSessionId }) {
         setEdges([]);
       });
   }, [edgeId]);
+
+  useEffect(() => {
+    if (!edgeId) return;
+    api
+      .edgeConfig(edgeId)
+      .then((data) => {
+        if (!repoTouched && data?.default_repo) {
+          setRepo(data.default_repo);
+        }
+      })
+      .catch(() => {
+        // ignore
+      });
+  }, [edgeId, repoTouched]);
 
   const flushPending = useCallback(() => {
     const ws = wsRef.current;
@@ -150,7 +165,11 @@ export function AttachView({ sessions, initialSessionId }) {
       return;
     }
     if (!repo.trim()) {
-      setCreateError("Repo path is required.");
+      setCreateError("Repo path is required (or set default_repo in forged config).");
+      return;
+    }
+    if (worktree && !branch.trim()) {
+      setCreateError("Branch is required when creating a worktree.");
       return;
     }
     setCreating(true);
@@ -257,7 +276,10 @@ export function AttachView({ sessions, initialSessionId }) {
           />
           <input
             value=${repo}
-            onInput=${(e) => setRepo(e.target.value)}
+            onInput=${(e) => {
+              setRepoTouched(true);
+              setRepo(e.target.value);
+            }}
             placeholder="Repo path"
             style=${{
               background: T.bg2,

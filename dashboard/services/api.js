@@ -22,6 +22,9 @@ export const api = {
   edges() {
     return fetchJSON("/edges");
   },
+  edgeConfig(edgeId) {
+    return fetchJSON(`/edges/${edgeId}/config`);
+  },
   startSession(payload) {
     return fetchJSON("/sessions", {
       method: "POST",

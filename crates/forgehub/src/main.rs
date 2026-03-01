@@ -102,6 +102,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/pairing/exchange", post(pairing_exchange))
                 .route("/pair", get(pairing_landing))
                 .route("/edges", get(list_edges))
+                .route("/edges/:id/config", get(edge_config))
                 .route("/edges/register", post(register_edge))
                 .route("/edges/heartbeat", post(heartbeat))
                 .route("/ws", get(ws_handler))
@@ -639,6 +640,50 @@ async fn list_edges(
         Json(service.list_registered_edges()),
     )
         .into_response()
+}
+
+async fn edge_config(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let edge = service
+        .list_registered_edges()
+        .into_iter()
+        .find(|edge| edge.id == id);
+    let Some(edge) = edge else {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown edge" })),
+        )
+            .into_response();
+    };
+    let url = format!("{}/config", normalize_http_addr(&edge.addr));
+    match reqwest::Client::new().get(url).send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+            (status, Json(body)).into_response()
+        }
+        Err(err) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
