@@ -52,6 +52,7 @@ export function TopNav({ view, onViewChange, pendingCount, connection }) {
       ${tab("fleet", "Dashboard")}
       ${tab("decisions", "Decisions", pendingCount ? html`<${Badge} color=${T.ember} bg=${T.emberS}>${pendingCount}</${Badge}>` : null)}
       ${tab("replay", "Replay")}
+      ${tab("attach", "Attach")}
     </div>
     <div style=${{ display: "flex", alignItems: "center", gap: "8px", color: T.t2, fontSize: "12px" }}>
       <${Dot} color=${connColor} size=${8} pulse=${connection !== "live"} />

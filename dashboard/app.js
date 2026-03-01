@@ -5,6 +5,7 @@ import { TopNav } from "./components/nav.js";
 import { FleetDashboard } from "./components/fleet.js";
 import { DecisionQueue } from "./components/decisions.js";
 import { SessionReplay } from "./components/replay.js";
+import { AttachView } from "./components/attach.js";
 import { workspace as baseWorkspace } from "./state.js";
 import { api } from "./services/api.js";
 import { connectWS } from "./services/ws.js";
@@ -36,6 +37,7 @@ function App() {
   const [connection, setConnection] = useState("connecting");
   const [reviewer, setReviewer] = useState(() => localStorage.getItem("forgemux_reviewer") || "Operator");
   const [replaySessionId, setReplaySessionId] = useState(null);
+  const [attachSessionId, setAttachSessionId] = useState(null);
   const [replayEvents, setReplayEvents] = useState([]);
   const [replayDiff, setReplayDiff] = useState(null);
   const [replayTerminal, setReplayTerminal] = useState(null);
@@ -123,6 +125,10 @@ function App() {
       }
       if (event.key === "3") {
         setView("replay");
+        return;
+      }
+      if (event.key === "4") {
+        setView("attach");
         return;
       }
       if (view === "decisions") {
@@ -227,6 +233,8 @@ function App() {
       terminal=${replayTerminal}
       error=${replayError}
     />`}
+    ${view === "attach" &&
+    html`<${AttachView} sessions=${sessions} initialSessionId=${attachSessionId} />`}
   </div>`;
 }
 
