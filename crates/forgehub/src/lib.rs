@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tokio::time::{Duration, interval};
+use tracing::{debug, instrument, warn};
 
 mod db;
 mod risk;
@@ -69,6 +70,7 @@ pub struct HubService {
 }
 
 impl HubService {
+    #[instrument(skip(config))]
     pub async fn new(config: HubConfig) -> anyhow::Result<Self> {
         let db = init_db(&config.data_dir).await?;
         let (decision_tx, _) = broadcast::channel(100);
@@ -102,6 +104,7 @@ impl HubService {
         self.issued_tokens.lock().unwrap().get(token).is_some()
     }
 
+    #[instrument(skip(self))]
     pub fn start_pairing(&self, ttl_secs: i64) -> PairingToken {
         let token = uuid::Uuid::new_v4().simple().to_string();
         let expires_at = Utc::now() + chrono::Duration::seconds(ttl_secs.max(30));
@@ -116,6 +119,7 @@ impl HubService {
         record
     }
 
+    #[instrument(skip(self))]
     pub fn exchange_pairing(&self, token: &str, ttl_secs: i64) -> Option<IssuedToken> {
         let mut pairing = self.pairing_tokens.lock().unwrap();
         let record = pairing.remove(token)?;
@@ -146,6 +150,7 @@ impl HubService {
             .retain(|_, record| record.expires_at > now);
     }
 
+    #[instrument(skip(self))]
     pub fn register_edge(&self, id: String, addr: String) -> EdgeRegistration {
         let registration = EdgeRegistration {
             id: id.clone(),
@@ -157,6 +162,7 @@ impl HubService {
         registration
     }
 
+    #[instrument(skip(self))]
     pub fn heartbeat(&self, id: &str) -> Option<EdgeRegistration> {
         let mut guard = self.registry.lock().unwrap();
         let entry = guard.get_mut(id)?;
@@ -169,6 +175,7 @@ impl HubService {
         guard.values().cloned().collect()
     }
 
+    #[instrument(skip(self))]
     pub fn pick_edge(&self) -> Option<EdgeRegistration> {
         let guard = self.registry.lock().unwrap();
         if guard.is_empty() {
@@ -182,6 +189,7 @@ impl HubService {
         selected
     }
 
+    #[instrument(skip(self))]
     pub fn resolve_ws_url(&self, edge_id: Option<&str>) -> Option<String> {
         // Check static config edges first
         if let Some(id) = edge_id {
@@ -214,6 +222,7 @@ impl HubService {
         None
     }
 
+    #[instrument(skip(self))]
     pub fn list_sessions(&self) -> anyhow::Result<Vec<SessionRecord>> {
         let mut sessions = Vec::new();
         for edge in &self.config.edges {
@@ -226,6 +235,7 @@ impl HubService {
         Ok(sort_sessions(sessions))
     }
 
+    #[instrument(skip(self))]
     pub async fn poll_edges(self: Arc<Self>) {
         let client = reqwest::Client::new();
         let mut ticker = interval(Duration::from_secs(3));
@@ -249,11 +259,13 @@ impl HubService {
                                 self.cache_edge_sessions(&edge.id, sessions, &pending).await;
                             }
                             Err(_) => {
+                                warn!(edge_id = %edge.id, "edge poll failed (parse)");
                                 self.mark_edge_failure(&edge.id).await;
                             }
                         }
                     }
                     _ => {
+                        warn!(edge_id = %edge.id, "edge poll failed (http)");
                         self.mark_edge_failure(&edge.id).await;
                     }
                 }
@@ -314,12 +326,14 @@ impl HubService {
     fn mark_edge_success(&self, edge_id: &str) {
         let mut failures = self.edge_failures.lock().unwrap();
         failures.insert(edge_id.to_string(), 0);
+        debug!(edge_id, "edge poll success");
     }
 
     pub fn subscribe_decisions(&self) -> broadcast::Receiver<DecisionEvent> {
         self.decision_tx.subscribe()
     }
 
+    #[instrument(skip(self))]
     pub async fn list_decisions(
         &self,
         workspace_id: &str,
@@ -329,10 +343,12 @@ impl HubService {
         list_decisions(&self.db, workspace_id, repo_id, status).await
     }
 
+    #[instrument(skip(self))]
     pub async fn get_decision(&self, id: &str) -> anyhow::Result<Option<Decision>> {
         get_decision(&self.db, id).await
     }
 
+    #[instrument(skip(self))]
     pub async fn create_decision(&self, mut decision: Decision) -> anyhow::Result<Decision> {
         if decision.id.is_empty() {
             decision.id = self.next_decision_id();
@@ -348,6 +364,7 @@ impl HubService {
         Ok(decision)
     }
 
+    #[instrument(skip(self))]
     pub async fn resolve_decision(
         &self,
         decision_id: &str,
@@ -379,10 +396,12 @@ impl HubService {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub async fn record_replay_event(&self, event: ReplayEvent) -> anyhow::Result<()> {
         insert_replay_event(&self.db, &event).await
     }
 
+    #[instrument(skip(self))]
     pub async fn replay_timeline(
         &self,
         session_id: &str,

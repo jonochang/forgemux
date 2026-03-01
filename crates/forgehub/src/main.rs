@@ -21,6 +21,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tower_http::services::ServeDir;
+use tracing::{debug, warn};
 
 const DASHBOARD_HTML: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -491,6 +492,7 @@ async fn ws_decisions(
     if !authorized(&service, &headers, query.token.as_deref()) {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
+    debug!(workspace_id = %query.workspace_id, "decisions ws connected");
     ws.on_upgrade(move |socket| decisions_socket(service, query.workspace_id, socket))
 }
 
@@ -501,6 +503,7 @@ async fn decisions_socket(service: Arc<HubService>, workspace_id: String, mut so
         .unwrap_or_default();
     let init = serde_json::json!({ "type": "decisions_init", "decisions": pending });
     if socket.send(Message::Text(init.to_string())).await.is_err() {
+        warn!(workspace_id = %workspace_id, "decisions ws send failed");
         return;
     }
 
@@ -540,6 +543,7 @@ async fn decisions_socket(service: Arc<HubService>, workspace_id: String, mut so
                     .await
                     .is_err()
                 {
+                    warn!(workspace_id = %workspace_id, "decisions ws send failed");
                     break;
                 }
             }
@@ -577,6 +581,7 @@ async fn ws_sessions(
     if !authorized(&service, &headers, query.token.as_deref()) {
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
+    debug!("sessions ws connected");
     ws.on_upgrade(move |socket| sessions_socket(service, socket))
 }
 
@@ -588,6 +593,7 @@ async fn sessions_socket(service: Arc<HubService>, mut socket: WebSocket) {
             .await
             .is_err()
         {
+            warn!("sessions ws send failed");
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
