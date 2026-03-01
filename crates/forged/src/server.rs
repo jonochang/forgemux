@@ -70,6 +70,7 @@ pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>)
         .route("/sessions/start", post(start_session::<R>))
         .route("/sessions/:id/stop", post(stop_session::<R>))
         .route("/sessions/:id/logs", get(session_logs::<R>))
+        .route("/sessions/:id/replay/diff", get(session_replay_diff::<R>))
         .route("/sessions/:id/replay.jsonl", get(session_replay::<R>))
         .route("/sessions/:id/input", post(session_input::<R>))
         .route("/sessions/:id/usage", get(session_usage::<R>))
@@ -317,6 +318,58 @@ async fn session_replay<R: CommandRunner + 'static>(
             }),
         )),
     }
+}
+
+async fn session_replay_diff<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
+    let session = service.session(&id).map_err(|err| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+    })?;
+    let files = service.diff_stats(&id).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )
+    })?;
+    let repo = session
+        .repo_root
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| session.repo_root.display().to_string());
+    Ok(Json(serde_json::json!({
+        "groups": [
+            {
+                "repo": repo,
+                "files": files
+            }
+        ]
+    })))
 }
 
 #[derive(Debug, Deserialize)]

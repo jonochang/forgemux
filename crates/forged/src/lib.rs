@@ -484,6 +484,13 @@ pub struct UsageRecord {
     pub estimated_cost_usd: f64,
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiffStatEntry {
+    pub path: String,
+    pub additions: u64,
+    pub deletions: u64,
+}
+
 impl<R: CommandRunner> SessionService<R> {
     pub fn new(config: ForgedConfig, runner: R) -> Self {
         let store = SessionStore::new(&config.data_dir);
@@ -946,6 +953,45 @@ impl<R: CommandRunner> SessionService<R> {
             return Ok(String::new());
         }
         Ok(fs::read_to_string(path)?)
+    }
+
+    pub fn diff_stats(&self, id: &str) -> anyhow::Result<Vec<DiffStatEntry>> {
+        let id = forgemux_core::SessionId::from(id);
+        let record = self.store.load(&id)?;
+        if forgemux_core::RepoRoot::discover(&record.repo_root).is_none() {
+            return Ok(Vec::new());
+        }
+        let args = vec![
+            "-C".to_string(),
+            record.repo_root.to_string_lossy().to_string(),
+            "diff".to_string(),
+            "--numstat".to_string(),
+        ];
+        let output = self.runner.run("git", &args)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git diff failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let mut entries = Vec::new();
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let mut parts = line.split('\t');
+            let additions = parts.next().unwrap_or("0");
+            let deletions = parts.next().unwrap_or("0");
+            let path = parts.next().unwrap_or("");
+            if path.is_empty() {
+                continue;
+            }
+            let additions = additions.parse::<u64>().unwrap_or(0);
+            let deletions = deletions.parse::<u64>().unwrap_or(0);
+            entries.push(DiffStatEntry {
+                path: path.to_string(),
+                additions,
+                deletions,
+            });
+        }
+        Ok(entries)
     }
 
     fn build_detector(&self) -> StateDetector {

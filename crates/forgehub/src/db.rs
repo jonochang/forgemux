@@ -228,11 +228,11 @@ pub async fn resolve_decision(
     id: &str,
     resolution: &DecisionResolution,
 ) -> anyhow::Result<()> {
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         UPDATE decisions
         SET resolved_at = ?, resolution_json = ?
-        WHERE id = ?
+        WHERE id = ? AND resolved_at IS NULL
         "#,
     )
     .bind(resolution.resolved_at.to_rfc3339())
@@ -240,6 +240,9 @@ pub async fn resolve_decision(
     .bind(id)
     .execute(pool)
     .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("decision already resolved");
+    }
     Ok(())
 }
 
@@ -617,6 +620,30 @@ mod tests {
             .await
             .unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_decision_rejects_double_resolve() {
+        let tmp = tempdir().unwrap();
+        let pool = init_db(tmp.path()).await.unwrap();
+        seed_workspace(&pool).await;
+
+        let decision = sample_decision("D-0002");
+        insert_decision(&pool, &decision).await.unwrap();
+
+        let resolution = DecisionResolution {
+            action: DecisionAction::Approve,
+            reviewer: "jono".to_string(),
+            comment: None,
+            resolved_at: Utc::now(),
+        };
+        resolve_decision(&pool, "D-0002", &resolution)
+            .await
+            .unwrap();
+        let err = resolve_decision(&pool, "D-0002", &resolution)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("already resolved"));
     }
 
     #[tokio::test]

@@ -920,7 +920,7 @@ async fn replay_timeline(
 async fn replay_diff(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
-    axum::extract::Path(_id): axum::extract::Path<String>,
+    axum::extract::Path(id): axum::extract::Path<String>,
 ) -> impl IntoResponse {
     if let Some(resp) = check_version(&headers) {
         return resp;
@@ -932,9 +932,26 @@ async fn replay_diff(
         )
             .into_response();
     }
+    let edges = service.list_registered_edges();
+    for edge in edges {
+        let url = format!(
+            "{}/sessions/{}/replay/diff",
+            normalize_http_addr(&edge.addr),
+            id
+        );
+        if let Ok(resp) = reqwest::Client::new().get(url).send().await
+            && resp.status().is_success()
+        {
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .unwrap_or_else(|_| serde_json::json!({ "groups": [] }));
+            return (axum::http::StatusCode::OK, Json(body)).into_response();
+        }
+    }
     (
-        axum::http::StatusCode::OK,
-        Json(serde_json::json!({ "groups": [] })),
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "session not found" })),
     )
         .into_response()
 }
@@ -1890,6 +1907,63 @@ mod tests {
             .and_then(|value| value.as_str())
             .unwrap();
         assert_eq!(action, "cargo test");
+    }
+
+    #[tokio::test]
+    async fn replay_diff_proxies_to_edge() {
+        let edge_app = Router::new().route(
+            "/sessions/:id/replay/diff",
+            get(|axum::extract::Path(_id): axum::extract::Path<String>| async {
+                Json(serde_json::json!({
+                    "groups": [
+                        { "repo": "repo-1", "files": [ { "path": "src/lib.rs", "additions": 1, "deletions": 0 } ] }
+                    ]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, edge_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
+        service.register_edge("edge-01".to_string(), addr.to_string());
+        let app = Router::new()
+            .route("/sessions/:id/replay/diff", get(replay_diff))
+            .with_state(service);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/sessions/S-1/replay/diff")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let repo = json
+            .get("groups")
+            .and_then(|groups| groups.as_array())
+            .and_then(|groups| groups.first())
+            .and_then(|group| group.get("repo"))
+            .and_then(|value| value.as_str())
+            .unwrap();
+        assert_eq!(repo, "repo-1");
     }
 
     #[test]

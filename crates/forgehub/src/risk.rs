@@ -145,4 +145,35 @@ mod tests {
         let risk = compute_risk(&meta, &[decision], SessionState::Running, now);
         risk == RiskLevel::Red
     }
+
+    #[quickcheck]
+    fn prop_risk_deterministic(context_pct: u8) -> bool {
+        let meta = meta_with(context_pct % 100, TestsStatus::Passing);
+        let now = Utc::now();
+        let first = compute_risk(&meta, &[], SessionState::Running, now);
+        let second = compute_risk(&meta, &[], SessionState::Running, now);
+        first == second
+    }
+
+    #[quickcheck]
+    fn prop_risk_monotonic_context(a: u8, b: u8) -> bool {
+        let a = a % 101;
+        let b = b % 101;
+        let low = a.min(b);
+        let high = a.max(b);
+        let now = Utc::now();
+        let meta_low = meta_with(low, TestsStatus::Passing);
+        let meta_high = meta_with(high, TestsStatus::Passing);
+        let low_risk = compute_risk(&meta_low, &[], SessionState::Running, now);
+        let high_risk = compute_risk(&meta_high, &[], SessionState::Running, now);
+        risk_rank(low_risk) <= risk_rank(high_risk)
+    }
+
+    fn risk_rank(risk: RiskLevel) -> u8 {
+        match risk {
+            RiskLevel::Green => 0,
+            RiskLevel::Yellow => 1,
+            RiskLevel::Red => 2,
+        }
+    }
 }

@@ -117,7 +117,7 @@ export function statusColor(status) {
 }
 
 export function contextColor(pct) {
-  if (pct >= 85) return T.err;
+  if (pct > 85) return T.err;
   if (pct >= 70) return T.warn;
   return T.ok;
 }
