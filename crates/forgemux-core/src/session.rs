@@ -126,6 +126,7 @@ pub struct SessionRecord {
     pub policy: Option<String>,
     pub goal: Option<String>,
     pub agent_session_id: Option<String>,
+    #[serde(default)]
     pub version: u64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
