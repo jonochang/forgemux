@@ -69,6 +69,15 @@ pub enum DecisionAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quickcheck_macros::quickcheck;
+
+    fn action_from_seed(seed: u8) -> DecisionAction {
+        match seed % 3 {
+            0 => DecisionAction::Approve,
+            1 => DecisionAction::Deny,
+            _ => DecisionAction::Comment,
+        }
+    }
 
     #[test]
     fn severity_orders_by_priority() {
@@ -111,5 +120,13 @@ mod tests {
         let json = serde_json::to_string(&decision).unwrap();
         let decoded: Decision = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, decision);
+    }
+
+    #[quickcheck]
+    fn decision_action_roundtrip(seed: u8) -> bool {
+        let action = action_from_seed(seed);
+        let json = serde_json::to_string(&action).unwrap();
+        let decoded: DecisionAction = serde_json::from_str(&json).unwrap();
+        decoded == action
     }
 }

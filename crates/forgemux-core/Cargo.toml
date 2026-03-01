@@ -15,6 +15,8 @@ regex.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+quickcheck.workspace = true
+quickcheck_macros.workspace = true
 
 [lib]
 path = "src/lib.rs"
