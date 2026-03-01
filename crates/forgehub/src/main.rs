@@ -383,25 +383,94 @@ async fn decision_action(
         )
             .into_response();
     }
-    match service
-        .resolve_decision(&decision_id, action, &req.reviewer, req.comment)
+    let decision = match service.get_decision(&decision_id).await {
+        Ok(Some(decision)) => decision,
+        Ok(None) => {
+            return (
+                axum::http::StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "decision not found" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    if let Err(err) = service
+        .resolve_decision(&decision_id, action, &req.reviewer, req.comment.clone())
         .await
     {
-        Ok(()) => (
-            axum::http::StatusCode::OK,
-            Json(serde_json::json!({
-                "decision_id": decision_id,
-                "action": format!("{action:?}").to_lowercase(),
-                "session_unblocked": action != DecisionAction::Comment,
-            })),
-        )
-            .into_response(),
-        Err(err) => (
+        return (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": err.to_string() })),
         )
-            .into_response(),
+            .into_response();
     }
+    let mut session_unblocked = action != DecisionAction::Comment;
+    if action != DecisionAction::Comment {
+        let ok = forward_decision_response(
+            &service,
+            &decision.session_id,
+            action,
+            &req.reviewer,
+            req.comment.clone(),
+        )
+        .await;
+        if !ok {
+            session_unblocked = false;
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({
+                    "error": "failed to notify edge",
+                    "decision_id": decision_id,
+                    "action": format!("{action:?}").to_lowercase(),
+                    "session_unblocked": session_unblocked,
+                })),
+            )
+                .into_response();
+        }
+    }
+    (
+        axum::http::StatusCode::OK,
+        Json(serde_json::json!({
+            "decision_id": decision_id,
+            "action": format!("{action:?}").to_lowercase(),
+            "session_unblocked": session_unblocked,
+        })),
+    )
+        .into_response()
+}
+
+async fn forward_decision_response(
+    service: &HubService,
+    session_id: &str,
+    action: DecisionAction,
+    reviewer: &str,
+    comment: Option<String>,
+) -> bool {
+    let payload = serde_json::json!({
+        "action": action,
+        "reviewer": reviewer,
+        "comment": comment,
+    });
+    let edges = service.list_registered_edges();
+    for edge in edges {
+        let url = format!(
+            "{}/sessions/{}/decision-response",
+            normalize_http_addr(&edge.addr),
+            session_id
+        );
+        if let Ok(resp) = reqwest::Client::new().post(url).json(&payload).send().await
+            && resp.status().is_success()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 #[derive(Debug, Deserialize)]
@@ -1335,6 +1404,20 @@ mod tests {
 
     #[tokio::test]
     async fn decision_roundtrip_endpoints() {
+        let edge_app = Router::new().route(
+            "/sessions/:id/decision-response",
+            post(
+                |axum::extract::Path(_id): axum::extract::Path<String>| async {
+                    Json(serde_json::json!({ "status": "ok" }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, edge_app).await.unwrap();
+        });
+
         let tmp = tempfile::tempdir().unwrap();
         let service = Arc::new(
             HubService::new(HubConfig {
@@ -1345,6 +1428,7 @@ mod tests {
             .await
             .unwrap(),
         );
+        service.register_edge("edge-01".to_string(), addr.to_string());
         let app = Router::new()
             .route("/decisions", get(list_decisions).post(create_decision))
             .route("/decisions/:id/approve", post(decision_approve))
@@ -1562,6 +1646,97 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn decision_resolution_forwards_to_edge() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = captured.clone();
+        let edge_app = Router::new().route(
+            "/sessions/:id/decision-response",
+            post(
+                move |axum::extract::Path(id): axum::extract::Path<String>,
+                      Json(payload): Json<serde_json::Value>| async move {
+                    let mut guard = captured_clone.lock().unwrap();
+                    *guard = Some(serde_json::json!({ "id": id, "payload": payload }));
+                    Json(serde_json::json!({ "status": "ok" }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, edge_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
+        service.register_edge("edge-01".to_string(), addr.to_string());
+        let app = Router::new()
+            .route("/decisions", post(create_decision))
+            .route("/decisions/:id/approve", post(decision_approve))
+            .with_state(service);
+
+        let payload = serde_json::json!({
+            "session_id": "S-1234",
+            "workspace_id": "ws-1",
+            "repo_id": "repo-1",
+            "question": "Proceed?",
+            "context": { "type": "log", "text": "ok" },
+            "severity": "high",
+            "tags": [],
+            "impact_repo_ids": [],
+            "assigned_to": null,
+            "agent_goal": "Ship"
+        });
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/decisions")
+                    .header("content-type", "application/json")
+                    .body(Body::from(payload.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let created: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let decision_id = created.get("id").and_then(|value| value.as_str()).unwrap();
+
+        let approve = serde_json::json!({ "reviewer": "jono", "comment": "ok" });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/decisions/{}/approve", decision_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(approve.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let guard = captured.lock().unwrap();
+        let entry = guard.as_ref().expect("edge payload");
+        assert_eq!(entry.get("id").and_then(|v| v.as_str()), Some("S-1234"));
+        let payload = entry.get("payload").unwrap();
+        assert_eq!(
+            payload.get("reviewer").and_then(|v| v.as_str()),
+            Some("jono")
+        );
     }
 
     #[tokio::test]
