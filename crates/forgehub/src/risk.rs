@@ -37,6 +37,7 @@ pub fn compute_risk(
 mod tests {
     use super::*;
     use forgemux_core::{DecisionContext, Severity};
+    use quickcheck_macros::quickcheck;
 
     fn meta_with(context_pct: u8, tests_status: TestsStatus) -> SessionHubMeta {
         SessionHubMeta {
@@ -114,5 +115,34 @@ mod tests {
         let meta = meta_with(20, TestsStatus::Passing);
         let risk = compute_risk(&meta, &[], SessionState::Running, Utc::now());
         assert_eq!(risk, RiskLevel::Green);
+    }
+
+    #[quickcheck]
+    fn prop_green_when_low_context(seed: u8) -> bool {
+        let context_pct = seed % 70;
+        let meta = meta_with(context_pct, TestsStatus::Passing);
+        let risk = compute_risk(&meta, &[], SessionState::Running, Utc::now());
+        risk == RiskLevel::Green
+    }
+
+    #[quickcheck]
+    fn prop_red_when_high_context(seed: u8) -> bool {
+        let context_pct = 86 + (seed % 14);
+        let meta = meta_with(context_pct, TestsStatus::Passing);
+        let risk = compute_risk(&meta, &[], SessionState::Running, Utc::now());
+        risk == RiskLevel::Red
+    }
+
+    #[quickcheck]
+    fn prop_red_when_decision_old(seed: u8) -> bool {
+        let minutes = 16 + (seed as i64 % 30);
+        let meta = meta_with(10, TestsStatus::Passing);
+        let now = Utc::now();
+        let decision = Decision {
+            created_at: now - Duration::minutes(minutes),
+            ..decision_at(1)
+        };
+        let risk = compute_risk(&meta, &[decision], SessionState::Running, now);
+        risk == RiskLevel::Red
     }
 }

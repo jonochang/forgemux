@@ -29,3 +29,5 @@ path = "../forgemux-core"
 [dev-dependencies]
 tempfile.workspace = true
 tower = "0.5"
+quickcheck.workspace = true
+quickcheck_macros.workspace = true

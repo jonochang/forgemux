@@ -696,6 +696,8 @@ dependencies = [
  "clap",
  "forgemux-core",
  "futures-util",
+ "quickcheck",
+ "quickcheck_macros",
  "reqwest",
  "serde",
  "serde_json",
