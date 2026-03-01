@@ -122,7 +122,7 @@ The hub stores the goal in `session_cache.hub_meta_json` alongside workspace_id 
 **Resolution:** Use `sqlx`'s built-in migration system:
 1. Create `crates/forgehub/migrations/` directory
 2. Initial migration: `001_init.sql` with all `CREATE TABLE` statements
-3. Subsequent phases add numbered migrations: `002_add_replay_events.sql`, etc.
+3. Subsequent phases add numbered migrations: `002_add_replay_events.sql`, etc. (currently all schema lives in `001_init.sql`; follow-up migrations are not yet split out)
 4. `sqlx::migrate!()` runs pending migrations on hub startup
 5. Migrations are forward-only (no down migrations for v1)
 
@@ -978,15 +978,17 @@ Phase 6 requires both Phase 2 (backend) and Phase 5 (SPA shell).
 
 ## Open Decisions to Resolve Before Starting
 
-| # | Decision | Options | Suggested | CC Ref |
-|---|----------|---------|-----------|--------|
-| 1 | **Workspace seeding for v1** — workspaces need to exist before the dashboard works. How to create them? | (a) TOML config file, (b) CLI command `fmux workspace create`, (c) REST API `POST /workspaces` | **(a)** TOML config — simplest for v1, no new CLI or API surface | — |
-| 2 | **Session-to-workspace mapping** — how does the hub know which workspace a session belongs to? | (a) Agent passes workspace_id at start, (b) Map by repo path, (c) All sessions on an edge belong to one workspace | **(b)** Map by repo path — workspace config includes repo paths, hub matches on session's `repo_root` | — |
-| 3 | **WS backward compatibility** — the current dashboard relies on flat session array from `/sessions/ws`. Break it? | (a) Break immediately, (b) Gate on `?v=2` query param, (c) Send both formats temporarily | **(b)** Gate on `?v=2` — new dashboard sends `?v=2`, legacy gets flat array | — |
-| 4 | **Reviewer identity** — how does the dashboard know who the current user is for decision actions? | (a) Prompt on action, (b) Derive from auth token, (c) Set in localStorage on first visit | **(b)** Derive from auth token — pairing flow already associates identity | — |
-| 5 | **SQLite vs Postgres for v1** — tech_design_review.md strongly recommends Postgres, but current plan uses SQLite | (a) SQLite for v1, migrate later, (b) Postgres from day one, (c) Support both via sqlx feature flags | **(a)** SQLite for v1 — matches zero-dependency deployment story. sqlx migration system makes later switch straightforward. | CC-7 |
-| 6 | **Heartbeat interval** — how often should edges heartbeat, and how many misses before Unreachable? | (a) 3s poll, 2 misses = 6s, (b) 5s poll, 2 misses = 10s, (c) 10s poll, 3 misses = 30s | **(a)** 3s/2 misses — matches existing poll cadence, fast detection for interactive dashboard | CC-2 |
-| 7 | **Credential scrubbing strictness** — false positives (redacting non-secrets) vs false negatives (missing real secrets) | (a) Strict patterns (fewer false positives, may miss some), (b) Aggressive patterns (more false positives, fewer misses), (c) Configurable per workspace | **(a)** Strict patterns for v1 — can tighten later. False redaction is worse than a missed hex string in v1. | CC-9 |
+Resolved in code (documented here for completeness):
+
+| # | Decision | Implemented | Notes |
+|---|----------|-------------|-------|
+| 1 | **Workspace seeding for v1** | **Default workspace seed in DB** | `ensure_workspace` inserts `org-default` + workspace on decision creation. |
+| 2 | **Session-to-workspace mapping** | **All sessions default** | `workspace_id` is `"default"` in decision forward path; sessions list is not workspace-scoped. |
+| 3 | **WS backward compatibility** | **Legacy flat array retained** | `/sessions/ws` still returns a flat session array; no `?v=2` gating yet. |
+| 4 | **Reviewer identity** | **LocalStorage reviewer name** | Dashboard stores `forgemux_reviewer` locally; no token-derived identity yet. |
+| 5 | **SQLite vs Postgres for v1** | **SQLite** | Hub uses sqlite migrations (`001_init.sql`). |
+| 6 | **Heartbeat interval** | **3s poll** | Hub poll loop runs every 3s; unreachable after 2 misses. |
+| 7 | **Credential scrubbing strictness** | **Strict patterns** | `scrub.rs` uses targeted patterns; validated in tests. |
 
 ---
 
