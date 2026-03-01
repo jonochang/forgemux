@@ -1740,6 +1740,100 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn decision_flow_over_http() {
+        let captured = Arc::new(std::sync::Mutex::new(None));
+        let captured_clone = captured.clone();
+        let edge_app = Router::new().route(
+            "/sessions/:id/decision-response",
+            post(
+                move |axum::extract::Path(id): axum::extract::Path<String>,
+                      Json(payload): Json<serde_json::Value>| async move {
+                    let mut guard = captured_clone.lock().unwrap();
+                    *guard = Some(serde_json::json!({ "id": id, "payload": payload }));
+                    Json(serde_json::json!({ "status": "ok" }))
+                },
+            ),
+        );
+        let edge_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let edge_addr = edge_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(edge_listener, edge_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
+        let app = Router::new()
+            .route("/edges/register", post(register_edge))
+            .route("/decisions", post(create_decision))
+            .route("/decisions/:id/approve", post(decision_approve))
+            .with_state(service);
+        let hub_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let hub_addr = hub_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(hub_listener, app).await.unwrap();
+        });
+
+        let client = reqwest::Client::new();
+        let register = serde_json::json!({
+            "id": "edge-01",
+            "addr": edge_addr.to_string(),
+        });
+        let register_resp = client
+            .post(format!("http://{}/edges/register", hub_addr))
+            .json(&register)
+            .send()
+            .await
+            .unwrap();
+        assert!(register_resp.status().is_success());
+
+        let payload = serde_json::json!({
+            "session_id": "S-5678",
+            "workspace_id": "ws-1",
+            "repo_id": "repo-1",
+            "question": "Ship?",
+            "context": { "type": "log", "text": "ok" },
+            "severity": "high",
+            "tags": [],
+            "impact_repo_ids": [],
+            "assigned_to": null,
+            "agent_goal": "Ship"
+        });
+        let create_resp = client
+            .post(format!("http://{}/decisions", hub_addr))
+            .json(&payload)
+            .send()
+            .await
+            .unwrap();
+        assert!(create_resp.status().is_success());
+        let created: serde_json::Value = create_resp.json().await.unwrap();
+        let decision_id = created.get("id").and_then(|value| value.as_str()).unwrap();
+
+        let approve = serde_json::json!({ "reviewer": "jono", "comment": "ok" });
+        let approve_resp = client
+            .post(format!(
+                "http://{}/decisions/{}/approve",
+                hub_addr, decision_id
+            ))
+            .json(&approve)
+            .send()
+            .await
+            .unwrap();
+        assert!(approve_resp.status().is_success());
+
+        let guard = captured.lock().unwrap();
+        let entry = guard.as_ref().expect("edge payload");
+        assert_eq!(entry.get("id").and_then(|v| v.as_str()), Some("S-5678"));
+    }
+
+    #[tokio::test]
     async fn replay_timeline_returns_events() {
         let tmp = tempfile::tempdir().unwrap();
         let service = Arc::new(
