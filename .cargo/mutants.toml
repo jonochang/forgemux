@@ -1,0 +1,16 @@
+exclude_globs = [
+    "crates/fmux/**",
+    "dashboard/**",
+    "crates/*/tests/**",
+]
+
+exclude_re = [
+    "impl.*Display.*fmt",
+    "impl.*Debug.*fmt",
+    "fn main",
+    "fn init_tracing",
+    "fn init_db",
+]
+
+timeout_multiplier = 3.0
+jobs = 4
