@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "../lib/hooks.module.js
 import { html, Dot, Badge, SectionLabel, statusColor } from "./shared.js";
 import { T } from "../theme.js";
 import { ansiToHtml } from "../lib/ansi.js";
+import { updateLastSeen } from "../lib/stream.js";
 import { api } from "../services/api.js";
 
 export function AttachView({ sessions, initialSessionId }) {
@@ -21,6 +22,7 @@ export function AttachView({ sessions, initialSessionId }) {
   const wsRef = useRef(null);
   const sessionIdRef = useRef(null);
   const pendingInputsRef = useRef([]);
+  const lastSeenRef = useRef(0);
   const terminalRef = useRef(null);
 
   useEffect(() => {
@@ -82,7 +84,7 @@ export function AttachView({ sessions, initialSessionId }) {
           return;
         }
         setAttachStatus("attached");
-        ws.send(JSON.stringify({ type: "resume", last_seen_event_id: 0 }));
+        ws.send(JSON.stringify({ type: "resume", last_seen_event_id: lastSeenRef.current }));
         flushPending();
       });
 
@@ -97,6 +99,7 @@ export function AttachView({ sessions, initialSessionId }) {
               terminalRef.current.innerHTML = ansiToHtml(trimmed);
               terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
             }
+            lastSeenRef.current = updateLastSeen(lastSeenRef.current, payload);
           }
           if (payload.type === "ack") {
             setAttachStatus(`acked ${payload.input_id}`);
@@ -127,6 +130,7 @@ export function AttachView({ sessions, initialSessionId }) {
     (id) => {
       sessionIdRef.current = id;
       setSelectedId(id);
+      lastSeenRef.current = 0;
       if (terminalRef.current) {
         terminalRef.current.innerHTML = "";
       }
