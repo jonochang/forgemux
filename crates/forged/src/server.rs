@@ -20,6 +20,7 @@ use forgemux_core::{AgentType, DecisionAction, DecisionContext, ReplayEventType,
 use rand::RngCore;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -32,6 +33,14 @@ pub struct StartRequest {
     pub worktree_path: Option<String>,
     pub notify: Option<Vec<String>>,
     pub policy: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct ImportRequest {
+    pub tmux_session: String,
+    pub agent: String,
+    pub model: String,
+    pub repo: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -69,6 +78,7 @@ pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>)
         .route("/metrics", get(metrics::<R>))
         .route("/sessions", get(list_sessions::<R>))
         .route("/sessions/start", post(start_session::<R>))
+        .route("/sessions/import", post(import_session::<R>))
         .route("/sessions/:id/stop", post(stop_session::<R>))
         .route("/sessions/:id/kill", post(kill_session::<R>))
         .route("/sessions/:id/logs", get(session_logs::<R>))
@@ -248,6 +258,53 @@ async fn start_session<R: CommandRunner + 'static>(
         notify,
         req.policy,
     ) {
+        Ok(record) => Ok(Json(StartResponse {
+            session_id: record.id.as_str().to_string(),
+        })),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )),
+    }
+}
+
+async fn import_session<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+    Json(req): Json<ImportRequest>,
+) -> Result<Json<StartResponse>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
+    let agent = match req.agent.as_str() {
+        "claude" => AgentType::Claude,
+        "codex" => AgentType::Codex,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!("unknown agent: {}", other),
+                }),
+            ));
+        }
+    };
+    let repo = req.repo.map(PathBuf::from);
+    match service.import_tmux_session(&req.tmux_session, agent, req.model, repo) {
         Ok(record) => Ok(Json(StartResponse {
             session_id: record.id.as_str().to_string(),
         })),
@@ -1092,6 +1149,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn import_session_endpoint() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        runner.set_stdout_for(&["display-message", "#{pane_current_path}"], b"/tmp/repo\n");
+        let service = Arc::new(SessionService::new(config, runner));
+        let app = build_router(service);
+
+        let request = serde_json::json!({
+            "tmux_session": "old-session",
+            "agent": "claude",
+            "model": "sonnet"
+        });
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions/import")
+                    .header("content-type", "application/json")
+                    .body(Body::from(request.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

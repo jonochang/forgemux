@@ -64,6 +64,17 @@ enum Command {
     Kill {
         session_id: String,
     },
+    Import {
+        tmux_session: String,
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        #[arg(long, default_value = "sonnet")]
+        model: String,
+        #[arg(long)]
+        repo: Option<String>,
+        #[arg(long)]
+        no_attach: bool,
+    },
     Ls,
     Status {
         session_id: String,
@@ -272,6 +283,58 @@ fn main() {
                 }
                 Err(err) => {
                     eprintln!("kill failed: {err}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::Import {
+            tmux_session,
+            agent,
+            model,
+            repo,
+            no_attach,
+        } => {
+            let agent = match agent.as_str() {
+                "claude" => AgentType::Claude,
+                "codex" => AgentType::Codex,
+                other => {
+                    eprintln!("unknown agent: {other}");
+                    std::process::exit(2);
+                }
+            };
+            let request = forged::server::ImportRequest {
+                tmux_session,
+                agent: match agent {
+                    AgentType::Claude => "claude".to_string(),
+                    AgentType::Codex => "codex".to_string(),
+                },
+                model,
+                repo,
+            };
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/sessions/import", edge_addr.trim_end_matches('/'));
+            let req = apply_headers(client.post(url).json(&request), token.as_deref());
+            let response = req.send();
+            match response {
+                Ok(resp) if resp.status().is_success() => {
+                    let body = resp.json::<forged::server::StartResponse>().unwrap();
+                    println!("{}", body.session_id);
+                    if !no_attach && let Err(err) = service.attach_session(&body.session_id) {
+                        eprintln!("attach failed: {err}");
+                        std::process::exit(1);
+                    }
+                }
+                Ok(resp) => {
+                    let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                        forged::server::ErrorResponse {
+                            error: "unknown error".to_string(),
+                        },
+                    );
+                    eprintln!("import failed: {}", body.error);
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("import failed: {err}");
                     std::process::exit(1);
                 }
             }

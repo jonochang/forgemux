@@ -843,6 +843,55 @@ impl<R: CommandRunner> SessionService<R> {
         Ok(())
     }
 
+    pub fn import_tmux_session(
+        &self,
+        tmux_name: &str,
+        agent: AgentType,
+        model: impl Into<String>,
+        repo_override: Option<PathBuf>,
+    ) -> anyhow::Result<SessionRecord> {
+        if !self.tmux_has_session(tmux_name) {
+            anyhow::bail!("tmux session not found: {}", tmux_name);
+        }
+        let repo_root = match repo_override {
+            Some(path) => path,
+            None => {
+                let path = self.tmux_display(tmux_name, "#{pane_current_path}")?;
+                if path.is_empty() {
+                    anyhow::bail!("tmux session has no current path: {}", tmux_name);
+                }
+                PathBuf::from(path)
+            }
+        };
+        let mut record = SessionRecord::new(agent, model, repo_root);
+        let new_id = record.id.as_str().to_string();
+        self.rename_tmux_session(tmux_name, &new_id)?;
+        self.ensure_transcript_pipe(&record)?;
+        self.set_tmux_env(&record.id, "SESSION_ID", record.id.as_str())?;
+        if let Some(addr) = self.config.advertise_addr.clone() {
+            self.set_tmux_env(&record.id, "FORGED_ADDR", &addr)?;
+            if let Some(port) = addr.rsplit(':').next() {
+                self.set_tmux_env(&record.id, "FORGED_PORT", port)?;
+            }
+        }
+        let expected = record.version;
+        record.touch_state(SessionState::Running);
+        self.store.save_checked(&record, expected)?;
+        self.log_state_change(
+            &record.id,
+            SessionState::Provisioning,
+            SessionState::Running,
+        );
+        self.record_replay_event(
+            &record.id,
+            ReplayEventType::System,
+            "Session imported",
+            None,
+            None,
+        );
+        Ok(record)
+    }
+
     pub fn drain(&self, force: bool) -> anyhow::Result<()> {
         let path = self.drain_marker();
         fs::write(path, b"draining")?;
@@ -948,6 +997,53 @@ impl<R: CommandRunner> SessionService<R> {
             );
         }
         Ok(())
+    }
+
+    fn rename_tmux_session(&self, from: &str, to: &str) -> anyhow::Result<()> {
+        let args = vec![
+            "rename-session".to_string(),
+            "-t".to_string(),
+            from.to_string(),
+            to.to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &args)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux rename-session failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    fn tmux_display(&self, target: &str, format: &str) -> anyhow::Result<String> {
+        let args = vec![
+            "display-message".to_string(),
+            "-p".to_string(),
+            "-t".to_string(),
+            target.to_string(),
+            format.to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &args)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux display-message failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn tmux_has_session(&self, target: &str) -> bool {
+        let args = vec![
+            "has-session".to_string(),
+            "-t".to_string(),
+            target.to_string(),
+        ];
+        self.runner
+            .run(&self.config.tmux_bin, &args)
+            .map(|out| out.status.success())
+            .unwrap_or(false)
     }
 
     fn send_graceful_shutdown(&self, id: &forgemux_core::SessionId) -> anyhow::Result<()> {
@@ -2045,6 +2141,34 @@ mod tests {
             .join(format!("{}.jsonl", record.id.as_str()));
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("\"to\":\"Terminated\""));
+    }
+
+    #[test]
+    fn import_tmux_session_renames_and_records() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        runner.set_stdout_for(&["display-message", "#{pane_current_path}"], b"/tmp/repo\n");
+        let service = SessionService::new(config, runner.clone());
+
+        let record = service
+            .import_tmux_session("old-session", AgentType::Claude, "sonnet", None)
+            .unwrap();
+
+        assert!(record.id.as_str().starts_with("S-"));
+        assert_eq!(record.state, SessionState::Running);
+        assert_eq!(record.repo_root, PathBuf::from("/tmp/repo"));
+        let calls = runner.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.contains(&"rename-session".to_string()))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.contains(&"old-session".to_string()))
+        );
     }
 
     #[test]
