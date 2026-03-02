@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.17 - 2026-03-02
+- Embed dashboard assets into the forgehub binary (no external dashboard files required).
+- Session attach resumes from last seen event to avoid replay loops.
+
 ## 0.1.16 - 2026-03-02
 
 - Hide stale terminal-state sessions (>3 days) from fleet dashboard.
