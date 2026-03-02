@@ -4,6 +4,7 @@ use axum::{
         Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
+    http::Uri,
     http::{HeaderMap, HeaderValue},
     response::IntoResponse,
     routing::{get, post},
@@ -13,6 +14,8 @@ use clap::{Parser, Subcommand};
 use forgehub::{DecisionEvent, DecisionStatus, EdgeRegistration, HubConfig, HubService};
 use forgemux_core::{Decision, DecisionAction, DecisionContext, Severity};
 use futures_util::{SinkExt, StreamExt, future::join_all};
+use include_dir::{Dir, include_dir};
+use mime_guess::MimeGuess;
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
@@ -20,17 +23,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
-use tower_http::services::ServeDir;
 use tracing::{debug, warn};
 
-const DASHBOARD_HTML: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../dashboard/index.html"
-));
-const DASHBOARD_LEGACY_HTML: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../dashboard/index-legacy.html"
-));
+const DASHBOARD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../dashboard");
 const FORGEHUB_VERSION_HEADER: &str = "x-forgemux-version";
 
 #[derive(Debug, Subcommand)]
@@ -110,7 +105,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/", get(dashboard_index))
                 .route("/index.html", get(dashboard_index))
                 .route("/legacy", get(dashboard_legacy))
-                .fallback_service(ServeDir::new("dashboard"))
+                .fallback(get(dashboard_asset))
                 .with_state(shared);
             rt.block_on(async move {
                 let poller = service.clone();
@@ -159,7 +154,11 @@ async fn dashboard_index() -> impl IntoResponse {
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
-    (axum::http::StatusCode::OK, headers, DASHBOARD_HTML)
+    (
+        axum::http::StatusCode::OK,
+        headers,
+        dashboard_bytes("index.html"),
+    )
 }
 
 async fn dashboard_legacy() -> impl IntoResponse {
@@ -168,7 +167,37 @@ async fn dashboard_legacy() -> impl IntoResponse {
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static("text/html; charset=utf-8"),
     );
-    (axum::http::StatusCode::OK, headers, DASHBOARD_LEGACY_HTML)
+    (
+        axum::http::StatusCode::OK,
+        headers,
+        dashboard_bytes("index-legacy.html"),
+    )
+}
+
+async fn dashboard_asset(uri: Uri) -> impl IntoResponse {
+    let path = uri.path().trim_start_matches('/');
+    if path.is_empty() || path == "index.html" {
+        return dashboard_index().await.into_response();
+    }
+    if path == "legacy" {
+        return dashboard_legacy().await.into_response();
+    }
+    if let Some(body) = DASHBOARD_DIR.get_file(path).map(|file| file.contents()) {
+        let mut headers = HeaderMap::new();
+        let mime = MimeGuess::from_path(path).first_or_octet_stream();
+        if let Ok(value) = HeaderValue::from_str(mime.as_ref()) {
+            headers.insert(axum::http::header::CONTENT_TYPE, value);
+        }
+        return (axum::http::StatusCode::OK, headers, body).into_response();
+    }
+    axum::http::StatusCode::NOT_FOUND.into_response()
+}
+
+fn dashboard_bytes(path: &str) -> &'static [u8] {
+    DASHBOARD_DIR
+        .get_file(path)
+        .map(|file| file.contents())
+        .unwrap_or_else(|| b"")
 }
 
 async fn list_sessions(
@@ -2116,9 +2145,11 @@ mod tests {
 
     #[test]
     fn dashboard_includes_attach_and_queue() {
-        assert!(DASHBOARD_HTML.contains("app.js"));
-        assert!(DASHBOARD_HTML.contains("id=\"app\""));
-        assert!(DASHBOARD_LEGACY_HTML.contains("sessions/ws"));
+        let html = std::str::from_utf8(dashboard_bytes("index.html")).unwrap();
+        let legacy = std::str::from_utf8(dashboard_bytes("index-legacy.html")).unwrap();
+        assert!(html.contains("app.js"));
+        assert!(html.contains("id=\"app\""));
+        assert!(legacy.contains("sessions/ws"));
     }
 
     #[tokio::test]
