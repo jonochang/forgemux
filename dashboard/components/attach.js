@@ -18,6 +18,8 @@ export function AttachView({ sessions, initialSessionId }) {
   const [branch, setBranch] = useState("main");
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState("");
+  const [killError, setKillError] = useState("");
+  const [killingId, setKillingId] = useState("");
   const [repoTouched, setRepoTouched] = useState(false);
   const wsRef = useRef(null);
   const sessionIdRef = useRef(null);
@@ -207,6 +209,23 @@ export function AttachView({ sessions, initialSessionId }) {
     }
   }, [edgeId, agent, model, repo, worktree, branch, selectSession]);
 
+  const killSession = useCallback(
+    async (id, label) => {
+      const confirmed = window.confirm(`Kill session ${label}? This will terminate it immediately.`);
+      if (!confirmed) return;
+      setKillError("");
+      setKillingId(id);
+      try {
+        await api.killSession(id);
+      } catch (err) {
+        setKillError(err?.message || "Failed to kill session.");
+      } finally {
+        setKillingId("");
+      }
+    },
+    []
+  );
+
   const handleKeyDown = useCallback(
     (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
@@ -343,6 +362,8 @@ export function AttachView({ sessions, initialSessionId }) {
         <${SectionLabel}>Sessions</${SectionLabel}>
       </div>
       <div style=${{ flex: 1, overflowY: "auto" }}>
+        ${killError &&
+        html`<div style=${{ padding: "8px 16px", color: T.err, fontSize: "11px" }}>${killError}</div>`}
         ${sessions.length === 0 &&
         html`<div style=${{ padding: "16px", color: T.t3, fontSize: "13px" }}>No sessions.</div>`}
         ${sessions.map(
@@ -372,6 +393,26 @@ export function AttachView({ sessions, initialSessionId }) {
                   flex: 1,
                 }}
               >${s.goal || s.id}</span>
+              <button
+                onClick=${(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  killSession(s.id, s.goal || s.id);
+                }}
+                disabled=${killingId === s.id}
+                style=${{
+                  background: T.bg2,
+                  color: T.err,
+                  border: `1px solid ${T.border}`,
+                  borderRadius: "6px",
+                  padding: "2px 6px",
+                  fontSize: "10px",
+                  cursor: killingId === s.id ? "default" : "pointer",
+                  opacity: killingId === s.id ? 0.5 : 1,
+                }}
+              >
+                ${killingId === s.id ? "Killing..." : "Kill"}
+              </button>
             </div>
             <div style=${{ display: "flex", alignItems: "center", gap: "6px", paddingLeft: "15px" }}>
               ${s.model &&

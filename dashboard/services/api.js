@@ -31,6 +31,11 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
+  killSession(sessionId) {
+    return fetchJSON(`/sessions/${sessionId}/kill`, {
+      method: "POST",
+    });
+  },
   decisions(workspaceId) {
     const qs = new URLSearchParams({ workspace_id: workspaceId });
     return fetchJSON(`/decisions?${qs.toString()}`);
