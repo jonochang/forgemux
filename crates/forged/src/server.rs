@@ -70,6 +70,7 @@ pub fn build_router<R: CommandRunner + 'static>(service: Arc<SessionService<R>>)
         .route("/sessions", get(list_sessions::<R>))
         .route("/sessions/start", post(start_session::<R>))
         .route("/sessions/:id/stop", post(stop_session::<R>))
+        .route("/sessions/:id/kill", post(kill_session::<R>))
         .route("/sessions/:id/logs", get(session_logs::<R>))
         .route("/sessions/:id/replay/diff", get(session_replay_diff::<R>))
         .route("/sessions/:id/replay.jsonl", get(session_replay::<R>))
@@ -282,6 +283,38 @@ async fn stop_session<R: CommandRunner + 'static>(
     }
     match service.stop_session(&id) {
         Ok(()) => Ok(Json(serde_json::json!({ "status": "stopped" }))),
+        Err(err) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: err.to_string(),
+            }),
+        )),
+    }
+}
+
+async fn kill_session<R: CommandRunner + 'static>(
+    State(service): State<Arc<SessionService<R>>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    if let Some(resp) = check_version(&headers) {
+        return Err((
+            resp.status(),
+            Json(ErrorResponse {
+                error: "version mismatch".to_string(),
+            }),
+        ));
+    }
+    if !authorized(&service, &headers, None) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".to_string(),
+            }),
+        ));
+    }
+    match service.kill_session(&id) {
+        Ok(()) => Ok(Json(serde_json::json!({ "status": "killed" }))),
         Err(err) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

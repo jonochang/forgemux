@@ -209,6 +209,8 @@ pub struct ForgedConfig {
     pub tmux_bin: String,
     pub idle_threshold_secs: i64,
     pub waiting_threshold_secs: i64,
+    pub graceful_shutdown_ms: u64,
+    pub graceful_shutdown_poll_ms: u64,
     pub agents: HashMap<AgentType, AgentConfig>,
     pub notifications: NotificationConfig,
     pub node_id: Option<String>,
@@ -256,6 +258,8 @@ impl ForgedConfig {
             tmux_bin: "tmux".to_string(),
             idle_threshold_secs: 60,
             waiting_threshold_secs: 15,
+            graceful_shutdown_ms: 2_000,
+            graceful_shutdown_poll_ms: 200,
             agents,
             notifications: NotificationConfig {
                 on_waiting_input: Vec::new(),
@@ -297,6 +301,12 @@ impl ForgedConfig {
         }
         if let Some(waiting_threshold_secs) = file.waiting_threshold_secs {
             config.waiting_threshold_secs = waiting_threshold_secs;
+        }
+        if let Some(graceful_shutdown_ms) = file.graceful_shutdown_ms {
+            config.graceful_shutdown_ms = graceful_shutdown_ms;
+        }
+        if let Some(graceful_shutdown_poll_ms) = file.graceful_shutdown_poll_ms {
+            config.graceful_shutdown_poll_ms = graceful_shutdown_poll_ms;
         }
         if let Some(agents) = file.agents {
             for (name, agent) in agents {
@@ -363,6 +373,8 @@ struct ForgedConfigFile {
     pub tmux_bin: Option<String>,
     pub idle_threshold_secs: Option<i64>,
     pub waiting_threshold_secs: Option<i64>,
+    pub graceful_shutdown_ms: Option<u64>,
+    pub graceful_shutdown_poll_ms: Option<u64>,
     pub agents: Option<HashMap<String, AgentFile>>,
     pub notifications: Option<NotificationConfigFile>,
     pub node_id: Option<String>,
@@ -817,17 +829,10 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn stop_session(&self, id: &str) -> anyhow::Result<()> {
         let id = forgemux_core::SessionId::from(id);
-        let args = vec![
-            "kill-session".to_string(),
-            "-t".to_string(),
-            id.as_str().to_string(),
-        ];
-        let output = self.runner.run(&self.config.tmux_bin, &args)?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "tmux kill-session failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
+        self.send_graceful_shutdown(&id)?;
+        self.wait_for_session_exit(&id);
+        if self.has_session(&id) {
+            self.kill_tmux_session(&id)?;
         }
         let mut record = self.store.load(&id)?;
         let from_state = record.state.clone();
@@ -918,7 +923,90 @@ impl<R: CommandRunner> SessionService<R> {
     }
 
     pub fn kill_session(&self, id: &str) -> anyhow::Result<()> {
-        self.stop_session(id)
+        let id = forgemux_core::SessionId::from(id);
+        self.kill_tmux_session(&id)?;
+        let mut record = self.store.load(&id)?;
+        let from_state = record.state.clone();
+        let expected = record.version;
+        record.touch_state(SessionState::Terminated);
+        self.store.save_checked(&record, expected)?;
+        self.log_state_change(&record.id, from_state, SessionState::Terminated);
+        Ok(())
+    }
+
+    fn kill_tmux_session(&self, id: &forgemux_core::SessionId) -> anyhow::Result<()> {
+        let args = vec![
+            "kill-session".to_string(),
+            "-t".to_string(),
+            id.as_str().to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &args)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux kill-session failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    fn send_graceful_shutdown(&self, id: &forgemux_core::SessionId) -> anyhow::Result<()> {
+        let interrupt = vec![
+            "send-keys".to_string(),
+            "-t".to_string(),
+            id.as_str().to_string(),
+            "C-c".to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &interrupt)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux send-keys C-c failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let exit_cmd = vec![
+            "send-keys".to_string(),
+            "-t".to_string(),
+            id.as_str().to_string(),
+            "-l".to_string(),
+            "exit".to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &exit_cmd)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux send-keys exit failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let enter = vec![
+            "send-keys".to_string(),
+            "-t".to_string(),
+            id.as_str().to_string(),
+            "Enter".to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &enter)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux send-keys Enter failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    fn wait_for_session_exit(&self, id: &forgemux_core::SessionId) {
+        if self.config.graceful_shutdown_ms == 0 {
+            return;
+        }
+        let timeout = std::time::Duration::from_millis(self.config.graceful_shutdown_ms);
+        let poll = std::time::Duration::from_millis(self.config.graceful_shutdown_poll_ms.max(1));
+        let start = std::time::Instant::now();
+        while start.elapsed() < timeout {
+            if !self.has_session(id) {
+                return;
+            }
+            std::thread::sleep(poll);
+        }
     }
 
     pub fn attach_session(&self, id: &str) -> anyhow::Result<()> {
@@ -1939,7 +2027,8 @@ mod tests {
     #[test]
     fn stop_session_writes_state_change_log() {
         let tmp = tempfile::tempdir().unwrap();
-        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        config.graceful_shutdown_ms = 0;
         let runner = FakeRunner::default();
         let service = SessionService::new(config, runner);
 
@@ -1956,6 +2045,28 @@ mod tests {
             .join(format!("{}.jsonl", record.id.as_str()));
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("\"to\":\"Terminated\""));
+    }
+
+    #[test]
+    fn kill_session_uses_tmux_kill() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner.clone());
+
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
+        record.id = forgemux_core::SessionId::from("S-KILL1");
+        record.touch_state(SessionState::Running);
+        service.store.save(&record).unwrap();
+
+        service.kill_session(record.id.as_str()).unwrap();
+
+        let calls = runner.calls();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.contains(&"kill-session".to_string()))
+        );
     }
 
     #[test]

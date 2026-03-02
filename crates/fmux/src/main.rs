@@ -253,7 +253,7 @@ fn main() {
         Command::Kill { session_id } => {
             let client = reqwest::blocking::Client::new();
             let url = format!(
-                "{}/sessions/{}/stop",
+                "{}/sessions/{}/kill",
                 edge_addr.trim_end_matches('/'),
                 session_id
             );

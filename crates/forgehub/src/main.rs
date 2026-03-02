@@ -86,6 +86,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/decisions/:id/comment", post(decision_comment))
                 .route("/sessions/ws", get(ws_sessions))
                 .route("/sessions/:id/stop", post(stop_session))
+                .route("/sessions/:id/kill", post(kill_session))
                 .route("/sessions/:id/logs", get(session_logs))
                 .route("/sessions/:id/input", post(session_input))
                 .route("/sessions/:id/usage", get(session_usage))
@@ -862,6 +863,41 @@ async fn stop_session(
             return (
                 axum::http::StatusCode::OK,
                 Json(serde_json::json!({ "status": "stopped" })),
+            )
+                .into_response();
+        }
+    }
+    (
+        axum::http::StatusCode::NOT_FOUND,
+        Json(serde_json::json!({ "error": "session not found" })),
+    )
+        .into_response()
+}
+
+async fn kill_session(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let edges = service.list_registered_edges();
+    for edge in edges {
+        let url = format!("{}/sessions/{}/kill", normalize_http_addr(&edge.addr), id);
+        if let Ok(resp) = reqwest::Client::new().post(url).send().await
+            && resp.status().is_success()
+        {
+            return (
+                axum::http::StatusCode::OK,
+                Json(serde_json::json!({ "status": "killed" })),
             )
                 .into_response();
         }
@@ -1720,6 +1756,50 @@ mod tests {
                     .uri("/sessions/S-1/input")
                     .header("content-type", "application/json")
                     .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn session_kill_proxies_to_edge() {
+        let edge_app = Router::new().route(
+            "/sessions/:id/kill",
+            post(
+                |axum::extract::Path(_id): axum::extract::Path<String>| async {
+                    Json(serde_json::json!({ "status": "killed" }))
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, edge_app).await.unwrap();
+        });
+
+        let tmp = tempfile::tempdir().unwrap();
+        let service = Arc::new(
+            HubService::new(HubConfig {
+                data_dir: tmp.path().join("hub"),
+                edges: Vec::new(),
+                tokens: Vec::new(),
+            })
+            .await
+            .unwrap(),
+        );
+        service.register_edge("edge-01".to_string(), addr.to_string());
+        let app = Router::new()
+            .route("/sessions/:id/kill", post(kill_session))
+            .with_state(service);
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/sessions/S-1/kill")
+                    .body(Body::empty())
                     .unwrap(),
             )
             .await
