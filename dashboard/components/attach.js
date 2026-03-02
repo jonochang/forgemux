@@ -6,7 +6,6 @@ import { api } from "../services/api.js";
 
 export function AttachView({ sessions, initialSessionId }) {
   const [selectedId, setSelectedId] = useState(initialSessionId || null);
-  const [content, setContent] = useState("");
   const [attachStatus, setAttachStatus] = useState("disconnected");
   const [inputText, setInputText] = useState("");
   const [edges, setEdges] = useState([]);
@@ -61,16 +60,13 @@ export function AttachView({ sessions, initialSessionId }) {
     pendingInputsRef.current = [];
   }, []);
 
-  const selectSession = useCallback(
+  const connectWs = useCallback(
     (id) => {
       if (wsRef.current) {
         wsRef.current.close();
         wsRef.current = null;
       }
 
-      sessionIdRef.current = id;
-      setSelectedId(id);
-      setContent("");
       setAttachStatus("connecting");
 
       if (!id) return;
@@ -97,14 +93,20 @@ export function AttachView({ sessions, initialSessionId }) {
           if (payload.type === "snapshot" || payload.type === "event") {
             const data = payload.data || "";
             const trimmed = data.replace(/^(\s*\n)+/, "").replace(/(\n\s*)+$/, "");
-            setContent(trimmed);
+            if (terminalRef.current) {
+              terminalRef.current.innerHTML = ansiToHtml(trimmed);
+              terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+            }
           }
           if (payload.type === "ack") {
             setAttachStatus(`acked ${payload.input_id}`);
           }
         } catch {
           // raw text fallback
-          setContent(event.data);
+          if (terminalRef.current) {
+            terminalRef.current.innerHTML = ansiToHtml(event.data);
+            terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
+          }
         }
       });
 
@@ -113,12 +115,24 @@ export function AttachView({ sessions, initialSessionId }) {
         setAttachStatus("disconnected");
         setTimeout(() => {
           if (sessionIdRef.current === id) {
-            selectSession(id);
+            connectWs(id);
           }
         }, 1500);
       });
     },
     [flushPending]
+  );
+
+  const selectSession = useCallback(
+    (id) => {
+      sessionIdRef.current = id;
+      setSelectedId(id);
+      if (terminalRef.current) {
+        terminalRef.current.innerHTML = "";
+      }
+      connectWs(id);
+    },
+    [connectWs]
   );
 
   // Cleanup on unmount
@@ -131,13 +145,6 @@ export function AttachView({ sessions, initialSessionId }) {
       }
     };
   }, []);
-
-  // Auto-scroll terminal
-  useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.scrollTop = terminalRef.current.scrollHeight;
-    }
-  }, [content]);
 
   const sendInput = useCallback(() => {
     if (!inputText) return;
@@ -408,8 +415,7 @@ export function AttachView({ sessions, initialSessionId }) {
           whiteSpace: "pre-wrap",
           wordBreak: "break-all",
         }}
-        dangerouslySetInnerHTML=${{ __html: content ? ansiToHtml(content) : "Select a session to attach." }}
-      ></div>
+      >Select a session to attach.</div>
 
       <!-- Input area -->
       <div

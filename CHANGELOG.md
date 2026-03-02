@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.16 - 2026-03-02
+
+- Hide stale terminal-state sessions (>3 days) from fleet dashboard.
+- Add Replay and Attach action links to fleet session cards.
+- Fix attach view terminal flickering on WebSocket reconnect.
+
 ## 0.1.15 - 2026-03-01
 
 - Add Session tab creation form with forged instance selection and default repo loading.
