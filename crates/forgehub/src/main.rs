@@ -11,7 +11,7 @@ use axum::{
 };
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use forgehub::{DecisionEvent, DecisionStatus, EdgeRegistration, HubConfig, HubService};
+use forgehub::{DecisionEvent, DecisionStatus, HubConfig, HubEdge, HubService};
 use forgemux_core::{Decision, DecisionAction, DecisionContext, Severity};
 use futures_util::{SinkExt, StreamExt, future::join_all};
 use include_dir::{Dir, include_dir};
@@ -19,17 +19,42 @@ use mime_guess::MimeGuess;
 use serde::Deserialize;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
 use tracing::{debug, warn};
+use uuid::Uuid;
 
 const DASHBOARD_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../dashboard");
 const FORGEHUB_VERSION_HEADER: &str = "x-forgemux-version";
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Configure {
+        #[arg(long)]
+        non_interactive: bool,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        data_dir: Option<PathBuf>,
+        #[arg(long)]
+        enable_tokens: bool,
+        #[arg(long)]
+        token: Option<String>,
+        #[arg(long)]
+        shared_fs: bool,
+        #[arg(long)]
+        edge_id: Option<String>,
+        #[arg(long)]
+        edge_data_dir: Option<PathBuf>,
+        #[arg(long)]
+        edge_ws_url: Option<String>,
+        #[arg(long)]
+        bind: Option<String>,
+    },
     Run,
     Check,
     Sessions,
@@ -71,6 +96,34 @@ fn main() -> anyhow::Result<()> {
     let service = Arc::new(rt.block_on(HubService::new(config))?);
 
     match cli.command {
+        Command::Configure {
+            non_interactive,
+            force,
+            dry_run,
+            ref data_dir,
+            enable_tokens,
+            ref token,
+            shared_fs,
+            ref edge_id,
+            ref edge_data_dir,
+            ref edge_ws_url,
+            ref bind,
+        } => {
+            run_configure(
+                &cli,
+                non_interactive,
+                force,
+                dry_run,
+                data_dir.clone(),
+                enable_tokens,
+                token.clone(),
+                shared_fs,
+                edge_id.clone(),
+                edge_data_dir.clone(),
+                edge_ws_url.clone(),
+                bind.clone(),
+            )?;
+        }
         Command::Run => {
             let addr: SocketAddr = cli.bind.parse()?;
             let shared = service.clone();
@@ -142,6 +195,157 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Version => println!("forgehub {}", env!("CARGO_PKG_VERSION")),
     }
+    Ok(())
+}
+
+fn run_configure(
+    cli: &Cli,
+    non_interactive: bool,
+    force: bool,
+    dry_run: bool,
+    data_dir: Option<PathBuf>,
+    enable_tokens: bool,
+    token: Option<String>,
+    shared_fs: bool,
+    edge_id: Option<String>,
+    edge_data_dir: Option<PathBuf>,
+    edge_ws_url: Option<String>,
+    bind: Option<String>,
+) -> anyhow::Result<()> {
+    let default_data_dir = PathBuf::from("./.forgemux-hub");
+    let bind_value = bind.unwrap_or_else(|| cli.bind.clone());
+    let data_dir_value = data_dir.unwrap_or(default_data_dir);
+
+    let use_tokens = if non_interactive {
+        enable_tokens || token.is_some()
+    } else {
+        prompt_bool("Enable auth tokens?", false)?
+    };
+    let token_value = if use_tokens {
+        if let Some(token) = token {
+            token
+        } else if non_interactive {
+            Uuid::new_v4().simple().to_string()
+        } else {
+            let input = prompt_string("Token (leave blank to generate)", None)?;
+            if input.is_empty() {
+                Uuid::new_v4().simple().to_string()
+            } else {
+                input
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    let use_shared_fs = if non_interactive {
+        shared_fs
+    } else {
+        prompt_bool("Hub shares filesystem with edge for session listing?", false)?
+    };
+
+    let edges = if use_shared_fs {
+        let id = if let Some(id) = edge_id {
+            id
+        } else if non_interactive {
+            "edge-01".to_string()
+        } else {
+            prompt_string("Edge ID", Some("edge-01"))?
+        };
+        let data_dir = if let Some(dir) = edge_data_dir {
+            dir
+        } else if non_interactive {
+            PathBuf::from("./.forgemux")
+        } else {
+            let input = prompt_string("Edge data_dir", Some("./.forgemux"))?;
+            PathBuf::from(input)
+        };
+        let ws_url = if let Some(url) = edge_ws_url {
+            Some(url)
+        } else if non_interactive {
+            None
+        } else {
+            let input = prompt_string("Edge ws_url (optional)", None)?;
+            if input.is_empty() {
+                None
+            } else {
+                Some(input)
+            }
+        };
+        vec![HubEdge { id, data_dir, ws_url }]
+    } else {
+        Vec::new()
+    };
+
+    let config = HubConfig {
+        data_dir: data_dir_value.clone(),
+        edges,
+        tokens: if use_tokens {
+            vec![token_value.clone()]
+        } else {
+            Vec::new()
+        },
+    };
+
+    write_config_file(&cli.config, &config, force, dry_run)?;
+    if !dry_run {
+        std::fs::create_dir_all(&data_dir_value)?;
+    }
+
+    println!("Configured forgehub.");
+    println!("Config: {}", cli.config.display());
+    println!("Data dir: {}", data_dir_value.display());
+    println!("Run: forgehub --bind {} --config {} run", bind_value, cli.config.display());
+    if use_tokens {
+        println!("Token: {}", token_value);
+    }
+    Ok(())
+}
+
+fn prompt_string(prompt: &str, default: Option<&str>) -> anyhow::Result<String> {
+    use std::io::{self, Write};
+    let mut stdout = io::stdout();
+    if let Some(default) = default {
+        write!(stdout, "{} [{}]: ", prompt, default)?;
+    } else {
+        write!(stdout, "{}: ", prompt)?;
+    }
+    stdout.flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_string();
+    if input.is_empty() {
+        Ok(default.unwrap_or("").to_string())
+    } else {
+        Ok(input)
+    }
+}
+
+fn prompt_bool(prompt: &str, default: bool) -> anyhow::Result<bool> {
+    let suffix = if default { "Y/n" } else { "y/N" };
+    let input = prompt_string(&format!("{} ({})", prompt, suffix), None)?;
+    if input.is_empty() {
+        return Ok(default);
+    }
+    let value = input.to_lowercase();
+    Ok(matches!(value.as_str(), "y" | "yes" | "true" | "1"))
+}
+
+fn write_config_file<T: serde::Serialize>(
+    path: &Path,
+    config: &T,
+    force: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
+    if path.exists() && !force {
+        anyhow::bail!("config already exists: {}", path.display());
+    }
+    let body = toml::to_string_pretty(config)?;
+    if dry_run {
+        println!("--- {} ---\n{}", path.display(), body);
+        return Ok(());
+    }
+    std::fs::write(path, body)?;
     Ok(())
 }
 
@@ -726,22 +930,18 @@ async fn register_edge(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
     Json(req): Json<RegisterEdgeRequest>,
-) -> Json<EdgeRegistration> {
-    if check_version(&headers).is_some() {
-        return Json(EdgeRegistration {
-            id: "version-mismatch".to_string(),
-            addr: "".to_string(),
-            last_seen: chrono::Utc::now(),
-        });
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
     }
     if !authorized(&service, &headers, None) {
-        return Json(EdgeRegistration {
-            id: "unauthorized".to_string(),
-            addr: "".to_string(),
-            last_seen: chrono::Utc::now(),
-        });
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
     }
-    Json(service.register_edge(req.id, req.addr))
+    (axum::http::StatusCode::OK, Json(service.register_edge(req.id, req.addr))).into_response()
 }
 
 #[derive(Debug, serde::Deserialize)]

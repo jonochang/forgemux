@@ -8,6 +8,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
+use uuid::Uuid;
 
 const FMUX_VERSION_HEADER: &str = "x-forgemux-version";
 
@@ -33,6 +34,14 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    Configure {
+        #[arg(long)]
+        non_interactive: bool,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
     #[command(alias = "s")]
     Start {
         #[arg(long, default_value = "claude")]
@@ -133,10 +142,20 @@ fn main() {
     let cli_config = load_cli_config(&cli.config).unwrap_or_default();
     let edge_addr = resolve_edge(cli.edge.as_deref(), cli.hub.as_deref(), &cli_config);
     let token = resolve_token(cli.token.as_deref(), &cli_config);
-    let config = ForgedConfig::default_with_data_dir(cli.data_dir);
+    let config = ForgedConfig::default_with_data_dir(cli.data_dir.clone());
     let service = SessionService::new(config, OsCommandRunner);
 
     match cli.command {
+        Command::Configure {
+            non_interactive,
+            force,
+            dry_run,
+        } => {
+            if let Err(err) = run_configure(&cli, non_interactive, force, dry_run) {
+                eprintln!("configure failed: {err}");
+                std::process::exit(1);
+            }
+        }
         Command::Start {
             agent,
             model,
@@ -737,6 +756,195 @@ fn main() {
             println!("fmux {}", env!("CARGO_PKG_VERSION"));
         }
     }
+}
+
+fn run_configure(cli: &Cli, non_interactive: bool, force: bool, dry_run: bool) -> anyhow::Result<()> {
+    let hub_config_path = cli.hub_config.clone();
+    let hub_data_dir_default = PathBuf::from("./.forgemux-hub");
+    let hub_bind_default = "127.0.0.1:8080".to_string();
+
+    let use_tokens = if non_interactive {
+        false
+    } else {
+        prompt_bool("Enable hub auth tokens?", false)?
+    };
+    let token_value = if use_tokens {
+        let input = prompt_string("Token (leave blank to generate)", None)?;
+        if input.is_empty() {
+            Uuid::new_v4().simple().to_string()
+        } else {
+            input
+        }
+    } else {
+        String::new()
+    };
+    let use_shared_fs = if non_interactive {
+        false
+    } else {
+        prompt_bool("Hub shares filesystem with edge for session listing?", false)?
+    };
+
+    let hub_data_dir = if non_interactive {
+        hub_data_dir_default.clone()
+    } else {
+        PathBuf::from(prompt_string("Hub data_dir", Some(hub_data_dir_default.to_string_lossy().as_ref()))?)
+    };
+    let hub_bind = if non_interactive {
+        hub_bind_default.clone()
+    } else {
+        prompt_string("Hub bind", Some(&hub_bind_default))?
+    };
+
+    let mut hub_args = vec![
+        "configure".to_string(),
+        "--non-interactive".to_string(),
+        format!("--data-dir={}", hub_data_dir.display()),
+        format!("--bind={}", hub_bind),
+    ];
+    if force {
+        hub_args.push("--force".to_string());
+    }
+    if dry_run {
+        hub_args.push("--dry-run".to_string());
+    }
+    if use_tokens {
+        hub_args.push("--enable-tokens".to_string());
+        hub_args.push(format!("--token={}", token_value));
+    }
+    if use_shared_fs {
+        let edge_id = if non_interactive {
+            "edge-01".to_string()
+        } else {
+            prompt_string("Edge ID", Some("edge-01"))?
+        };
+        let edge_data_dir = if non_interactive {
+            "./.forgemux".to_string()
+        } else {
+            prompt_string("Edge data_dir", Some("./.forgemux"))?
+        };
+        let edge_ws_url = if non_interactive {
+            "".to_string()
+        } else {
+            prompt_string("Edge ws_url (optional)", None)?
+        };
+        hub_args.push("--shared-fs".to_string());
+        hub_args.push(format!("--edge-id={}", edge_id));
+        hub_args.push(format!("--edge-data-dir={}", edge_data_dir));
+        if !edge_ws_url.is_empty() {
+            hub_args.push(format!("--edge-ws-url={}", edge_ws_url));
+        }
+    }
+
+    let status = std::process::Command::new("forgehub")
+        .arg(format!("--config={}", hub_config_path.display()))
+        .args(&hub_args)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("forgehub configure failed");
+    }
+
+    let edge_config_path = PathBuf::from("./forged.toml");
+    let edge_data_dir_default = PathBuf::from("./.forgemux");
+    let edge_bind_default = "127.0.0.1:9090".to_string();
+    let edge_register_hub = if non_interactive {
+        false
+    } else {
+        prompt_bool("Register this edge with the hub?", true)?
+    };
+    let edge_data_dir = if non_interactive {
+        edge_data_dir_default.clone()
+    } else {
+        PathBuf::from(prompt_string("Edge data_dir", Some(edge_data_dir_default.to_string_lossy().as_ref()))?)
+    };
+    let edge_bind = if non_interactive {
+        edge_bind_default.clone()
+    } else {
+        prompt_string("Edge bind", Some(&edge_bind_default))?
+    };
+    let edge_hub_url = if edge_register_hub {
+        if non_interactive {
+            "http://127.0.0.1:8080".to_string()
+        } else {
+            prompt_string("Hub URL", Some("http://127.0.0.1:8080"))?
+        }
+    } else {
+        String::new()
+    };
+    let edge_node_id = if non_interactive {
+        "edge-01".to_string()
+    } else {
+        prompt_string("Node ID", Some("edge-01"))?
+    };
+    let edge_advertise = if edge_register_hub {
+        if non_interactive {
+            edge_bind.clone()
+        } else {
+            prompt_string("Advertise address", Some(&edge_bind))?
+        }
+    } else {
+        String::new()
+    };
+
+    let mut edge_args = vec![
+        "configure".to_string(),
+        "--non-interactive".to_string(),
+        format!("--data-dir={}", edge_data_dir.display()),
+        format!("--bind={}", edge_bind),
+    ];
+    if force {
+        edge_args.push("--force".to_string());
+    }
+    if dry_run {
+        edge_args.push("--dry-run".to_string());
+    }
+    if edge_register_hub {
+        edge_args.push("--register-hub".to_string());
+        edge_args.push(format!("--hub-url={}", edge_hub_url));
+        if use_tokens && !token_value.is_empty() {
+            edge_args.push(format!("--hub-token={}", token_value));
+        }
+        edge_args.push(format!("--node-id={}", edge_node_id));
+        edge_args.push(format!("--advertise-addr={}", edge_advertise));
+    }
+
+    let status = std::process::Command::new("forged")
+        .arg(format!("--config={}", edge_config_path.display()))
+        .args(&edge_args)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("forged configure failed");
+    }
+
+    Ok(())
+}
+
+fn prompt_string(prompt: &str, default: Option<&str>) -> anyhow::Result<String> {
+    use std::io::{self, Write};
+    let mut stdout = io::stdout();
+    if let Some(default) = default {
+        write!(stdout, "{} [{}]: ", prompt, default)?;
+    } else {
+        write!(stdout, "{}: ", prompt)?;
+    }
+    stdout.flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim().to_string();
+    if input.is_empty() {
+        Ok(default.unwrap_or("").to_string())
+    } else {
+        Ok(input)
+    }
+}
+
+fn prompt_bool(prompt: &str, default: bool) -> anyhow::Result<bool> {
+    let suffix = if default { "Y/n" } else { "y/N" };
+    let input = prompt_string(&format!("{} ({})", prompt, suffix), None)?;
+    if input.is_empty() {
+        return Ok(default);
+    }
+    let value = input.to_lowercase();
+    Ok(matches!(value.as_str(), "y" | "yes" | "true" | "1"))
 }
 
 fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {

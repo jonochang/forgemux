@@ -96,26 +96,43 @@ export function SessionReplay({
     </div>
 
     <div style=${{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-      <div style=${{ display: "flex", gap: "6px", borderBottom: `1px solid ${T.border}`, padding: "8px 16px", background: T.bg2 }}>
-        ${[
-          { key: "diff", label: "Unified Diff" },
-          { key: "log", label: "Structured Log" },
-          { key: "terminal", label: "Terminal" },
-        ].map(
-          (tabInfo) => html`<button
-            key=${tabInfo.key}
-            onClick=${() => onTabChange(tabInfo.key)}
-            style=${{
-              background: "transparent",
-              border: "none",
-              cursor: "pointer",
-              padding: "8px 10px",
-              fontSize: "12px",
-              color: tab === tabInfo.key ? T.t1 : T.t3,
-              borderBottom: tab === tabInfo.key ? `2px solid ${T.ember}` : "2px solid transparent",
-            }}
-          >${tabInfo.label}</button>`
-        )}
+      <div style=${{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", borderBottom: `1px solid ${T.border}`, padding: "8px 16px", background: T.bg2 }}>
+        <div style=${{ display: "flex", gap: "6px" }}>
+          ${[
+            { key: "diff", label: "Unified Diff" },
+            { key: "tree", label: "File Tree" },
+            { key: "log", label: "Structured Log" },
+            { key: "terminal", label: "Terminal" },
+          ].map(
+            (tabInfo) => html`<button
+              key=${tabInfo.key}
+              onClick=${() => onTabChange(tabInfo.key)}
+              style=${{
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                padding: "8px 10px",
+                fontSize: "12px",
+                color: tab === tabInfo.key ? T.t1 : T.t3,
+                borderBottom: tab === tabInfo.key ? `2px solid ${T.ember}` : "2px solid transparent",
+              }}
+            >${tabInfo.label}</button>`
+          )}
+        </div>
+        <button
+          disabled
+          title="Atomic Merge is coming in v2."
+          style=${{
+            border: "1px solid transparent",
+            padding: "6px 12px",
+            borderRadius: "999px",
+            fontSize: "11px",
+            fontWeight: 600,
+            color: T.t4,
+            background: "linear-gradient(135deg, rgba(244,106,81,0.12), rgba(90,130,255,0.12))",
+            cursor: "not-allowed",
+          }}
+        >Atomic Merge</button>
       </div>
 
       <div style=${{ flex: 1, overflowY: "auto", padding: "20px" }}>
@@ -140,6 +157,21 @@ export function SessionReplay({
             .filter((evt) => evt.event_type !== "system")
             .map((evt) => `${formatTime(evt)} ${evt.event_type}: ${evt.action}`)
             .join("\n") || "No structured events yet."}
+        </div>`}
+        ${tab === "tree" &&
+        html`<div>
+          ${(diff?.groups || []).length === 0 &&
+          html`<div style=${{ color: T.t3 }}>No files recorded yet.</div>`}
+          ${(diff?.groups || []).map(
+            (group) => html`<div style=${{ marginBottom: "18px" }}>
+              <div style=${{ fontWeight: 600, marginBottom: "6px" }}>${group.repo}</div>
+              ${(group.files || []).map(
+                (file) => html`<div style=${{ fontFamily: T.mono, fontSize: "12px", color: T.t2 }}>
+                  ${file.path}
+                </div>`
+              )}
+            </div>`
+          )}
         </div>`}
         ${tab === "terminal" &&
         html`<pre style=${{ margin: 0, whiteSpace: "pre-wrap", fontFamily: T.mono, fontSize: "12px", color: T.t2 }}>

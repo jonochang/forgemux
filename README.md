@@ -104,6 +104,28 @@ NixOS config (flake):
 
 ## Quick Start (Hub + Dashboard)
 
+## Configure (Local Dev)
+
+Interactive config generation (recommended):
+
+```sh
+forgehub configure
+forged configure
+```
+
+Or run a combined flow:
+
+```sh
+fmux configure
+```
+
+Non-interactive defaults (for automation):
+
+```sh
+forgehub configure --non-interactive
+forged configure --non-interactive
+```
+
 1. Run the hub:
 
 ```sh
