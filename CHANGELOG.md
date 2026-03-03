@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.18 - 2026-03-03
+
+- Add interactive `configure` flows for forgehub/forged plus `fmux configure`.
+- Authenticate edge registration/heartbeat with hub tokens.
+- Add replay File Tree tab and Atomic Merge placeholder CTA.
+- Add Hub UX review notes.
+
 ## 0.1.17 - 2026-03-02
 - Embed dashboard assets into the forgehub binary (no external dashboard files required).
 - Session attach resumes from last seen event to avoid replay loops.
