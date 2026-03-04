@@ -116,6 +116,7 @@ pub struct AgentConfig {
     pub args: Vec<String>,
     pub prompt_patterns: Vec<String>,
     pub usage_paths: Vec<String>,
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +242,11 @@ impl ForgedConfig {
                     "~/.config/claude/projects/".to_string(),
                     "~/.claude/projects/".to_string(),
                 ],
+                models: vec![
+                    "sonnet".to_string(),
+                    "opus".to_string(),
+                    "haiku".to_string(),
+                ],
             },
         );
         agents.insert(
@@ -250,6 +256,7 @@ impl ForgedConfig {
                 args: vec![],
                 prompt_patterns: vec![r"(?m)^(?:> |\$ )".to_string()],
                 usage_paths: vec!["~/.codex/sessions/".to_string()],
+                models: vec!["o3".to_string()],
             },
         );
 
@@ -331,6 +338,9 @@ impl ForgedConfig {
                 if let Some(usage_paths) = agent.usage_paths {
                     entry.usage_paths = usage_paths;
                 }
+                if let Some(models) = agent.models {
+                    entry.models = models;
+                }
             }
         }
         if let Some(notifications) = file.notifications {
@@ -406,6 +416,7 @@ struct AgentFile {
     pub args: Option<Vec<String>>,
     pub prompt_patterns: Option<Vec<String>>,
     pub usage_paths: Option<Vec<String>>,
+    pub models: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -462,6 +473,82 @@ fn convert_hooks(hooks: Option<Vec<NotificationHookFile>>) -> Vec<NotificationHo
         .collect()
 }
 
+fn probe_models_for_agent<R: CommandRunner>(runner: &R, config: &AgentConfig) -> Vec<String> {
+    let probes = [["--models"], ["models"], ["--list-models"]];
+    for probe in probes {
+        let mut args = config.args.clone();
+        args.extend(probe.iter().map(|value| value.to_string()));
+        let output = match runner.run(&config.command, &args) {
+            Ok(output) => output,
+            Err(_) => continue,
+        };
+        if !output.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let parsed = parse_models_output(&text);
+        if !parsed.is_empty() {
+            return parsed;
+        }
+    }
+    Vec::new()
+}
+
+fn parse_models_output(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.starts_with('[')
+        && let Ok(list) = serde_json::from_str::<Vec<String>>(trimmed)
+    {
+        return list;
+    }
+    if trimmed.starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        if let Some(models) = value.get("models").and_then(|value| value.as_array()) {
+            return models
+                .iter()
+                .filter_map(|entry| entry.as_str().map(|value| value.to_string()))
+                .collect();
+        }
+        if let Some(data) = value.get("data").and_then(|value| value.as_array()) {
+            let mut out = Vec::new();
+            for entry in data {
+                if let Some(id) = entry.get("id").and_then(|value| value.as_str()) {
+                    out.push(id.to_string());
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+    }
+
+    let token_re = Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*$").unwrap();
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let token = line.split_whitespace().next().unwrap_or("");
+        if token.is_empty() {
+            continue;
+        }
+        let lower = token.to_ascii_lowercase();
+        if matches!(lower.as_str(), "model" | "models" | "id" | "name") {
+            continue;
+        }
+        if token_re.is_match(token) && seen.insert(token.to_string()) {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
 pub struct SessionService<R: CommandRunner> {
     config: ForgedConfig,
     runner: R,
@@ -471,6 +558,7 @@ pub struct SessionService<R: CommandRunner> {
     stream_manager: stream::StreamManager,
     adapters: AgentAdapters,
     log_watcher: std::sync::Mutex<LogWatcher>,
+    models_cache: std::sync::Mutex<HashMap<AgentType, Vec<String>>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -519,6 +607,7 @@ impl<R: CommandRunner> SessionService<R> {
             stream_manager: stream::StreamManager::new(ring_capacity, dedup_window),
             adapters,
             log_watcher: std::sync::Mutex::new(LogWatcher::default()),
+            models_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -528,6 +617,28 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn stream_manager(&self) -> stream::StreamManager {
         self.stream_manager.clone()
+    }
+
+    pub fn available_models_by_agent(&self) -> HashMap<AgentType, Vec<String>> {
+        let mut result = HashMap::new();
+        for (agent, config) in &self.config.agents {
+            if let Some(cached) = self.models_cache.lock().unwrap().get(agent).cloned() {
+                result.insert(agent.clone(), cached);
+                continue;
+            }
+            let probed = probe_models_for_agent(&self.runner, config);
+            let models = if probed.is_empty() {
+                config.models.clone()
+            } else {
+                probed
+            };
+            self.models_cache
+                .lock()
+                .unwrap()
+                .insert(agent.clone(), models.clone());
+            result.insert(agent.clone(), models);
+        }
+        result
     }
 
     pub fn acquire_pid_lock(&self) -> anyhow::Result<PidLock> {

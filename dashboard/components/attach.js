@@ -12,7 +12,15 @@ export function AttachView({ sessions, initialSessionId }) {
   const [edges, setEdges] = useState([]);
   const [edgeId, setEdgeId] = useState("");
   const [agent, setAgent] = useState("claude");
-  const modelOptions = ["sonnet", "opus", "haiku", "o3"];
+  const defaultModelOptionsByAgent = {
+    claude: ["sonnet", "opus", "haiku"],
+    codex: ["o3"],
+  };
+  const [modelsByAgent, setModelsByAgent] = useState(defaultModelOptionsByAgent);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const modelOptions = modelsLoaded
+    ? modelsByAgent[agent] || []
+    : defaultModelOptionsByAgent[agent] || [];
   const [model, setModel] = useState("sonnet");
   const [modelPreset, setModelPreset] = useState(() =>
     modelOptions.includes("sonnet") ? "sonnet" : "custom"
@@ -47,23 +55,34 @@ export function AttachView({ sessions, initialSessionId }) {
 
   useEffect(() => {
     if (!edgeId) return;
+    setModelsLoaded(false);
+    setModelsByAgent(defaultModelOptionsByAgent);
     api
       .edgeConfig(edgeId)
       .then((data) => {
         if (!repoTouched && data?.default_repo) {
           setRepo(data.default_repo);
         }
+        if (data?.models_by_agent) {
+          setModelsByAgent(data.models_by_agent);
+          setModelsLoaded(true);
+        }
       })
       .catch(() => {
         // ignore
       });
-  }, [edgeId, repoTouched]);
+  }, [edgeId]);
 
   useEffect(() => {
-    if (modelOptions.includes(model)) {
-      setModelPreset(model);
+    if (modelPreset === "custom") return;
+    if (!modelOptions.includes(model)) {
+      const fallback = modelOptions[0] || "custom";
+      setModelPreset(fallback === "custom" ? "custom" : fallback);
+      setModel(fallback === "custom" ? "" : fallback);
+      return;
     }
-  }, [model]);
+    setModelPreset(model);
+  }, [agent, model, modelPreset, modelOptions]);
 
   const flushPending = useCallback(() => {
     const ws = wsRef.current;
