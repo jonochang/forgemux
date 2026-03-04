@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.21 - 2026-03-05
+
+- Add configurable model probe args with timeouts to avoid hanging `forged check`.
+- Stop running undocumented model probe commands by default.
+- Update default Codex model list to `gpt-5.3-codex` and `gpt-5.2-codex`.
+
 ## 0.1.20 - 2026-03-05
 
 - Add forged doctor checks for model probe commands (claude/codex/gemini/opencode).
