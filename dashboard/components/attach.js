@@ -12,7 +12,11 @@ export function AttachView({ sessions, initialSessionId }) {
   const [edges, setEdges] = useState([]);
   const [edgeId, setEdgeId] = useState("");
   const [agent, setAgent] = useState("claude");
+  const modelOptions = ["sonnet", "opus", "haiku", "o3"];
   const [model, setModel] = useState("sonnet");
+  const [modelPreset, setModelPreset] = useState(() =>
+    modelOptions.includes("sonnet") ? "sonnet" : "custom"
+  );
   const [repo, setRepo] = useState("");
   const [worktree, setWorktree] = useState(true);
   const [branch, setBranch] = useState("main");
@@ -54,6 +58,12 @@ export function AttachView({ sessions, initialSessionId }) {
         // ignore
       });
   }, [edgeId, repoTouched]);
+
+  useEffect(() => {
+    if (modelOptions.includes(model)) {
+      setModelPreset(model);
+    }
+  }, [model]);
 
   const flushPending = useCallback(() => {
     const ws = wsRef.current;
@@ -291,10 +301,17 @@ export function AttachView({ sessions, initialSessionId }) {
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
           </select>
-          <input
-            value=${model}
-            onInput=${(e) => setModel(e.target.value)}
-            placeholder="Model"
+          <select
+            value=${modelPreset}
+            onChange=${(e) => {
+              const next = e.target.value;
+              setModelPreset(next);
+              if (next === "custom") {
+                setModel("");
+              } else {
+                setModel(next);
+              }
+            }}
             style=${{
               background: T.bg2,
               border: `1px solid ${T.border}`,
@@ -303,7 +320,24 @@ export function AttachView({ sessions, initialSessionId }) {
               borderRadius: "6px",
               fontSize: "12px",
             }}
-          />
+          >
+            ${modelOptions.map((option) => html`<option value=${option}>${option}</option>`)}
+            <option value="custom">Custom...</option>
+          </select>
+          ${modelPreset === "custom" &&
+          html`<input
+            value=${model}
+            onInput=${(e) => setModel(e.target.value)}
+            placeholder="Custom model"
+            style=${{
+              background: T.bg2,
+              border: `1px solid ${T.border}`,
+              color: T.t1,
+              padding: "6px 8px",
+              borderRadius: "6px",
+              fontSize: "12px",
+            }}
+          />`}
           <input
             value=${repo}
             onInput=${(e) => {
