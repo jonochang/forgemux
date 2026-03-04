@@ -24,16 +24,25 @@
         forgemuxPkg = pkgs.callPackage ./package.nix { };
         untanglePkg = pkgs.callPackage "${untangle}/package.nix" { };
         cruciblePkg = pkgs.callPackage "${crucible}/package.nix" { };
+        crucibleBin = pkgs.writeShellScriptBin "crucible" ''
+          exec ${cruciblePkg}/bin/crucible-cli "$@"
+        '';
       in
       {
         packages.forgemux = forgemuxPkg;
         packages.default = forgemuxPkg;
+        packages.crucible = crucibleBin;
+        packages.crucible-cli = cruciblePkg;
+
+        apps.crucible = flake-utils.lib.mkApp {
+          drv = crucibleBin;
+        };
 
         devShells.default = pkgs.mkShell {
           buildInputs = [
             rustToolchain
             untanglePkg
-            cruciblePkg
+            crucibleBin
 
             # Native build dependencies
             pkgs.pkg-config
