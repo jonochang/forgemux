@@ -43,6 +43,7 @@ function App() {
   const [replayTerminal, setReplayTerminal] = useState(null);
   const [replayTab, setReplayTab] = useState("diff");
   const [hotkeyAction, setHotkeyAction] = useState(null);
+  const [hubVersion, setHubVersion] = useState(null);
   const workspace = baseWorkspace;
 
   useEffect(() => {
@@ -69,6 +70,13 @@ function App() {
       onStatus: setConnection,
     });
     return () => stop();
+  }, []);
+
+  useEffect(() => {
+    api
+      .version()
+      .then((data) => setHubVersion(data?.version || null))
+      .catch(() => setHubVersion(null));
   }, []);
 
   useEffect(() => {
@@ -207,7 +215,13 @@ function App() {
   };
 
   return html`<div>
-    <${TopNav} view=${view} onViewChange=${setView} pendingCount=${pendingCount} connection=${connection} />
+    <${TopNav}
+      view=${view}
+      onViewChange=${setView}
+      pendingCount=${pendingCount}
+      connection=${connection}
+      hubVersion=${hubVersion}
+    />
     ${view === "fleet" &&
     html`<${FleetDashboard}
       sessions=${sessions}

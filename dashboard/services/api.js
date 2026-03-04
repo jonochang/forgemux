@@ -22,6 +22,9 @@ export const api = {
   edges() {
     return fetchJSON("/edges");
   },
+  version() {
+    return fetchJSON("/version");
+  },
   edgeConfig(edgeId) {
     return fetchJSON(`/edges/${edgeId}/config`);
   },

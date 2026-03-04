@@ -129,6 +129,7 @@ fn main() -> anyhow::Result<()> {
             let shared = service.clone();
             let app = Router::new()
                 .route("/health", get(health))
+                .route("/version", get(version))
                 .route("/metrics", get(metrics))
                 .route("/sessions", get(list_sessions).post(start_session))
                 .route("/decisions", get(list_decisions).post(create_decision))
@@ -198,6 +199,7 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_configure(
     cli: &Cli,
     non_interactive: bool,
@@ -241,7 +243,10 @@ fn run_configure(
     let use_shared_fs = if non_interactive {
         shared_fs
     } else {
-        prompt_bool("Hub shares filesystem with edge for session listing?", false)?
+        prompt_bool(
+            "Hub shares filesystem with edge for session listing?",
+            false,
+        )?
     };
 
     let edges = if use_shared_fs {
@@ -266,13 +271,13 @@ fn run_configure(
             None
         } else {
             let input = prompt_string("Edge ws_url (optional)", None)?;
-            if input.is_empty() {
-                None
-            } else {
-                Some(input)
-            }
+            if input.is_empty() { None } else { Some(input) }
         };
-        vec![HubEdge { id, data_dir, ws_url }]
+        vec![HubEdge {
+            id,
+            data_dir,
+            ws_url,
+        }]
     } else {
         Vec::new()
     };
@@ -295,7 +300,11 @@ fn run_configure(
     println!("Configured forgehub.");
     println!("Config: {}", cli.config.display());
     println!("Data dir: {}", data_dir_value.display());
-    println!("Run: forgehub --bind {} --config {} run", bind_value, cli.config.display());
+    println!(
+        "Run: forgehub --bind {} --config {} run",
+        bind_value,
+        cli.config.display()
+    );
     if use_tokens {
         println!("Token: {}", token_value);
     }
@@ -941,7 +950,11 @@ async fn register_edge(
         )
             .into_response();
     }
-    (axum::http::StatusCode::OK, Json(service.register_edge(req.id, req.addr))).into_response()
+    (
+        axum::http::StatusCode::OK,
+        Json(service.register_edge(req.id, req.addr)),
+    )
+        .into_response()
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1565,6 +1578,13 @@ fn check_version(headers: &HeaderMap) -> Option<axum::response::Response> {
                 .into_response(),
         )
     }
+}
+
+async fn version() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "name": "forgehub",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 fn version_compatible(client: &str) -> bool {

@@ -1,7 +1,7 @@
 import { html, Badge, Dot } from "./shared.js";
 import { T } from "../theme.js";
 
-export function TopNav({ view, onViewChange, pendingCount, connection }) {
+export function TopNav({ view, onViewChange, pendingCount, connection, hubVersion }) {
   const tab = (id, label, badge) => html`<button
     onClick=${() => onViewChange(id)}
     style=${{
@@ -54,7 +54,22 @@ export function TopNav({ view, onViewChange, pendingCount, connection }) {
       ${tab("replay", "Replay")}
       ${tab("attach", "Session")}
     </div>
-    <div style=${{ display: "flex", alignItems: "center", gap: "8px", color: T.t2, fontSize: "12px" }}>
+    <div style=${{ display: "flex", alignItems: "center", gap: "10px", color: T.t2, fontSize: "12px" }}>
+      <a
+        href="/version"
+        target="_blank"
+        rel="noreferrer"
+        style=${{
+          color: T.t3,
+          textDecoration: "none",
+          letterSpacing: "0.04em",
+          textTransform: "uppercase",
+          fontSize: "10px",
+        }}
+        title=${hubVersion ? `Forgemux Hub ${hubVersion}` : "Forgemux Hub"}
+      >
+        about${hubVersion ? ` v${hubVersion}` : ""}
+      </a>
       <${Dot} color=${connColor} size=${8} pulse=${connection !== "live"} />
       ${connLabel}
     </div>
