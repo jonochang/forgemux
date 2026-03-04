@@ -1,4 +1,4 @@
-use crate::{AgentConfig, ForgedConfig};
+use crate::{AgentConfig, AgentType, CommandRunner, ForgedConfig, probe_models_for_command};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +16,30 @@ pub fn run_checks(config: &ForgedConfig) -> Vec<CheckItem> {
     for (agent, cfg) in &config.agents {
         items.push(check_agent(agent, cfg));
     }
+    items
+}
+
+pub fn run_checks_with_runner<R: CommandRunner>(
+    config: &ForgedConfig,
+    runner: &R,
+) -> Vec<CheckItem> {
+    let mut items = run_checks(config);
+    let claude = config.agents.get(&AgentType::Claude);
+    let codex = config.agents.get(&AgentType::Codex);
+    items.push(check_model_probe(
+        "Claude",
+        claude.map(|cfg| (cfg.command.as_str(), cfg.args.as_slice())),
+        "claude",
+        runner,
+    ));
+    items.push(check_model_probe(
+        "Codex",
+        codex.map(|cfg| (cfg.command.as_str(), cfg.args.as_slice())),
+        "codex",
+        runner,
+    ));
+    items.push(check_model_probe("Gemini", None, "gemini", runner));
+    items.push(check_model_probe("OpenCode", None, "opencode", runner));
     items
 }
 
@@ -74,6 +98,44 @@ fn check_agent(agent: &crate::AgentType, cfg: &AgentConfig) -> CheckItem {
             name,
             ok: false,
             message: format!("not found: {}", cfg.command),
+        },
+    }
+}
+
+fn check_model_probe<R: CommandRunner>(
+    label: &str,
+    config: Option<(&str, &[String])>,
+    fallback_command: &str,
+    runner: &R,
+) -> CheckItem {
+    let name = format!("{label} models probe");
+    let (command, args) = config.unwrap_or((fallback_command, &[]));
+    match resolve_program(command) {
+        Some(path) => {
+            let models = probe_models_for_command(runner, command, args);
+            if models.is_empty() {
+                CheckItem {
+                    name,
+                    ok: false,
+                    message: "probe returned no models".to_string(),
+                }
+            } else {
+                let preview = if models.len() > 6 {
+                    format!("{} (+{} more)", models[..6].join(", "), models.len() - 6)
+                } else {
+                    models.join(", ")
+                };
+                CheckItem {
+                    name,
+                    ok: true,
+                    message: format!("{} ({})", path.display(), preview),
+                }
+            }
+        }
+        None => CheckItem {
+            name,
+            ok: false,
+            message: format!("not found: {command}"),
         },
     }
 }

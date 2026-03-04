@@ -473,12 +473,17 @@ fn convert_hooks(hooks: Option<Vec<NotificationHookFile>>) -> Vec<NotificationHo
         .collect()
 }
 
-fn probe_models_for_agent<R: CommandRunner>(runner: &R, config: &AgentConfig) -> Vec<String> {
-    let probes = [["--models"], ["models"], ["--list-models"]];
-    for probe in probes {
-        let mut args = config.args.clone();
+const MODEL_PROBE_ARGS: [&[&str]; 3] = [&["--models"], &["models"], &["--list-models"]];
+
+pub(crate) fn probe_models_for_command<R: CommandRunner>(
+    runner: &R,
+    command: &str,
+    base_args: &[String],
+) -> Vec<String> {
+    for probe in MODEL_PROBE_ARGS {
+        let mut args = base_args.to_vec();
         args.extend(probe.iter().map(|value| value.to_string()));
-        let output = match runner.run(&config.command, &args) {
+        let output = match runner.run(command, &args) {
             Ok(output) => output,
             Err(_) => continue,
         };
@@ -494,7 +499,7 @@ fn probe_models_for_agent<R: CommandRunner>(runner: &R, config: &AgentConfig) ->
     Vec::new()
 }
 
-fn parse_models_output(text: &str) -> Vec<String> {
+pub(crate) fn parse_models_output(text: &str) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Vec::new();
@@ -626,7 +631,7 @@ impl<R: CommandRunner> SessionService<R> {
                 result.insert(agent.clone(), cached);
                 continue;
             }
-            let probed = probe_models_for_agent(&self.runner, config);
+            let probed = probe_models_for_command(&self.runner, &config.command, &config.args);
             let models = if probed.is_empty() {
                 config.models.clone()
             } else {
@@ -639,6 +644,10 @@ impl<R: CommandRunner> SessionService<R> {
             result.insert(agent.clone(), models);
         }
         result
+    }
+
+    pub fn doctor_checks(&self) -> Vec<checks::CheckItem> {
+        checks::run_checks_with_runner(&self.config, &self.runner)
     }
 
     pub fn acquire_pid_lock(&self) -> anyhow::Result<PidLock> {

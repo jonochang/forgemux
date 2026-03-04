@@ -152,7 +152,7 @@ fn main() -> anyhow::Result<()> {
             });
         }
         Command::Check => {
-            let checks = forged::checks::run_checks(service.config());
+            let checks = service.doctor_checks();
             let mut failed = false;
             for item in checks {
                 let status = if item.ok { "✓" } else { "✗" };
