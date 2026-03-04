@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.19 - 2026-03-04
+
+- Add hub `/version` endpoint with discreet dashboard "about" link.
+- Add model preset dropdown (with custom override) when creating sessions.
+
 ## 0.1.18 - 2026-03-03
 
 - Add interactive `configure` flows for forgehub/forged plus `fmux configure`.

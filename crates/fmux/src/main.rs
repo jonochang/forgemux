@@ -758,7 +758,12 @@ fn main() {
     }
 }
 
-fn run_configure(cli: &Cli, non_interactive: bool, force: bool, dry_run: bool) -> anyhow::Result<()> {
+fn run_configure(
+    cli: &Cli,
+    non_interactive: bool,
+    force: bool,
+    dry_run: bool,
+) -> anyhow::Result<()> {
     let hub_config_path = cli.hub_config.clone();
     let hub_data_dir_default = PathBuf::from("./.forgemux-hub");
     let hub_bind_default = "127.0.0.1:8080".to_string();
@@ -781,13 +786,19 @@ fn run_configure(cli: &Cli, non_interactive: bool, force: bool, dry_run: bool) -
     let use_shared_fs = if non_interactive {
         false
     } else {
-        prompt_bool("Hub shares filesystem with edge for session listing?", false)?
+        prompt_bool(
+            "Hub shares filesystem with edge for session listing?",
+            false,
+        )?
     };
 
     let hub_data_dir = if non_interactive {
         hub_data_dir_default.clone()
     } else {
-        PathBuf::from(prompt_string("Hub data_dir", Some(hub_data_dir_default.to_string_lossy().as_ref()))?)
+        PathBuf::from(prompt_string(
+            "Hub data_dir",
+            Some(hub_data_dir_default.to_string_lossy().as_ref()),
+        )?)
     };
     let hub_bind = if non_interactive {
         hub_bind_default.clone()
@@ -854,7 +865,10 @@ fn run_configure(cli: &Cli, non_interactive: bool, force: bool, dry_run: bool) -
     let edge_data_dir = if non_interactive {
         edge_data_dir_default.clone()
     } else {
-        PathBuf::from(prompt_string("Edge data_dir", Some(edge_data_dir_default.to_string_lossy().as_ref()))?)
+        PathBuf::from(prompt_string(
+            "Edge data_dir",
+            Some(edge_data_dir_default.to_string_lossy().as_ref()),
+        )?)
     };
     let edge_bind = if non_interactive {
         edge_bind_default.clone()
