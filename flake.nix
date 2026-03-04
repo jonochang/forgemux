@@ -9,9 +9,10 @@
     };
     flake-utils.url = "github:numtide/flake-utils";
     untangle.url = "github:jonochang/untangle";
+    crucible.url = "github:jonochang/crucible";
   };
 
-  outputs = { self, nixpkgs, rust-overlay, flake-utils, untangle }:
+  outputs = { self, nixpkgs, rust-overlay, flake-utils, untangle, crucible }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         overlays = [ (import rust-overlay) ];
@@ -22,6 +23,7 @@
         };
         forgemuxPkg = pkgs.callPackage ./package.nix { };
         untanglePkg = pkgs.callPackage "${untangle}/package.nix" { };
+        cruciblePkg = pkgs.callPackage "${crucible}/package.nix" { };
       in
       {
         packages.forgemux = forgemuxPkg;
@@ -31,6 +33,7 @@
           buildInputs = [
             rustToolchain
             untanglePkg
+            cruciblePkg
 
             # Native build dependencies
             pkgs.pkg-config

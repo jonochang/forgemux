@@ -1,5 +1,25 @@
 {
   "nodes": {
+    "crucible": {
+      "inputs": {
+        "flake-utils": "flake-utils",
+        "nixpkgs": "nixpkgs",
+        "rust-overlay": "rust-overlay"
+      },
+      "locked": {
+        "lastModified": 1772661994,
+        "narHash": "sha256-lPOpl14Cd38PRu8n/+YLHCaVZh/c+r2LQE+oCLpgTug=",
+        "owner": "jonochang",
+        "repo": "crucible",
+        "rev": "b4c62d379b7db18b57999ab90711bde74bef316e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "jonochang",
+        "repo": "crucible",
+        "type": "github"
+      }
+    },
     "flake-utils": {
       "inputs": {
         "systems": "systems"
@@ -36,7 +56,41 @@
         "type": "github"
       }
     },
+    "flake-utils_3": {
+      "inputs": {
+        "systems": "systems_3"
+      },
+      "locked": {
+        "lastModified": 1731533236,
+        "narHash": "sha256-l0KFg5HjrsfsO/JpG+r7fRrqm12kzFHyUHqHCVpMMbI=",
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "rev": "11707dc2f618dd54ca8739b309ec4fc024de578b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "flake-utils",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
+      "locked": {
+        "lastModified": 1772542754,
+        "narHash": "sha256-WGV2hy+VIeQsYXpsLjdr4GvHv5eECMISX1zKLTedhdg=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "8c809a146a140c5c8806f13399592dbcb1bb5dc4",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "nixos-unstable",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
+    "nixpkgs_2": {
       "locked": {
         "lastModified": 1771923393,
         "narHash": "sha256-Fy0+UXELv9hOE8WjYhJt8fMDLYTU2Dqn3cX4BwoGBos=",
@@ -52,7 +106,7 @@
         "type": "github"
       }
     },
-    "nixpkgs_2": {
+    "nixpkgs_3": {
       "locked": {
         "lastModified": 1770843696,
         "narHash": "sha256-LovWTGDwXhkfCOmbgLVA10bvsi/P8eDDpRudgk68HA8=",
@@ -70,13 +124,35 @@
     },
     "root": {
       "inputs": {
-        "flake-utils": "flake-utils",
-        "nixpkgs": "nixpkgs",
-        "rust-overlay": "rust-overlay",
+        "crucible": "crucible",
+        "flake-utils": "flake-utils_2",
+        "nixpkgs": "nixpkgs_2",
+        "rust-overlay": "rust-overlay_2",
         "untangle": "untangle"
       }
     },
     "rust-overlay": {
+      "inputs": {
+        "nixpkgs": [
+          "crucible",
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1772593411,
+        "narHash": "sha256-47WOnCSyOL6AghZiMIJaTLWM359DHe3be9R1cNCdGUE=",
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "rev": "a741b36b77440f5db15fcf2ab6d7d592d2f9ee8f",
+        "type": "github"
+      },
+      "original": {
+        "owner": "oxalica",
+        "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "rust-overlay_2": {
       "inputs": {
         "nixpkgs": [
           "nixpkgs"
@@ -96,7 +172,7 @@
         "type": "github"
       }
     },
-    "rust-overlay_2": {
+    "rust-overlay_3": {
       "inputs": {
         "nixpkgs": [
           "untangle",
@@ -147,18 +223,33 @@
         "type": "github"
       }
     },
+    "systems_3": {
+      "locked": {
+        "lastModified": 1681028828,
+        "narHash": "sha256-Vy1rq5AaRuLzOxct8nz4T6wlgyUR7zLU309k9mBC768=",
+        "owner": "nix-systems",
+        "repo": "default",
+        "rev": "da67096a3b9bf56a91d16901293e51ba5b49a27e",
+        "type": "github"
+      },
+      "original": {
+        "owner": "nix-systems",
+        "repo": "default",
+        "type": "github"
+      }
+    },
     "untangle": {
       "inputs": {
-        "flake-utils": "flake-utils_2",
-        "nixpkgs": "nixpkgs_2",
-        "rust-overlay": "rust-overlay_2"
+        "flake-utils": "flake-utils_3",
+        "nixpkgs": "nixpkgs_3",
+        "rust-overlay": "rust-overlay_3"
       },
       "locked": {
-        "lastModified": 1771383128,
-        "narHash": "sha256-gsk07YT9km+v6NqPDqLBo37uqRulY9JkcrjovaxQ5eI=",
+        "lastModified": 1772666081,
+        "narHash": "sha256-9xnCIy9V0v7a2s7mkqVgqgBrT2DOo5esCB1iDFJCuLs=",
         "owner": "jonochang",
         "repo": "untangle",
-        "rev": "8902f1ac5bb40e49faf82de2ee6f7e7d5158defe",
+        "rev": "c91f0a7e8a650718b3fdf11febae0f85982b4be4",
         "type": "github"
       },
       "original": {
