@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.20 - 2026-03-05
+
+- Add forged doctor checks for model probe commands (claude/codex/gemini/opencode).
+- Auto-detect available models from installed agent tools and expose via edge config.
+
 ## 0.1.19 - 2026-03-04
 
 - Add hub `/version` endpoint with discreet dashboard "about" link.
