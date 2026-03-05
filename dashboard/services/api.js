@@ -77,6 +77,9 @@ export const api = {
     const suffix = qs.toString();
     return fetchJSON(`/sessions/${sessionId}/replay/timeline${suffix ? `?${suffix}` : ""}`);
   },
+  replayLatest(sessionId) {
+    return fetchJSON(`/sessions/${sessionId}/replay/latest`);
+  },
   replayDiff(sessionId) {
     return fetchJSON(`/sessions/${sessionId}/replay/diff`);
   },

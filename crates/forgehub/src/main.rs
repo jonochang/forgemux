@@ -149,6 +149,7 @@ fn main() -> anyhow::Result<()> {
                 .route("/sessions/:id/input", post(session_input))
                 .route("/sessions/:id/usage", get(session_usage))
                 .route("/sessions/:id/replay/timeline", get(replay_timeline))
+                .route("/sessions/:id/replay/latest", get(replay_latest))
                 .route("/sessions/:id/replay/diff", get(replay_diff))
                 .route("/sessions/:id/replay/terminal", get(replay_terminal))
                 .route("/foreman/report", get(foreman_report))
@@ -1332,6 +1333,33 @@ async fn replay_timeline(
             axum::http::StatusCode::OK,
             Json(serde_json::json!({ "events": events, "next_cursor": next_cursor })),
         )
+            .into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn replay_latest(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service.latest_replay_event(&id).await {
+        Ok(Some(event)) => (axum::http::StatusCode::OK, Json(event)).into_response(),
+        Ok(None) => (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({})))
             .into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
