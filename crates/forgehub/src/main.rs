@@ -90,6 +90,8 @@ fn main() -> anyhow::Result<()> {
             data_dir: PathBuf::from("./.forgemux-hub"),
             edges: Vec::new(),
             tokens: Vec::new(),
+            organization: None,
+            workspaces: Vec::new(),
         }
     };
     let rt = tokio::runtime::Runtime::new()?;
@@ -129,8 +131,11 @@ fn main() -> anyhow::Result<()> {
             let shared = service.clone();
             let app = Router::new()
                 .route("/health", get(health))
+                .route("/version", get(version))
                 .route("/metrics", get(metrics))
                 .route("/sessions", get(list_sessions).post(start_session))
+                .route("/workspaces", get(list_workspaces))
+                .route("/workspaces/:id", get(get_workspace))
                 .route("/decisions", get(list_decisions).post(create_decision))
                 .route("/decisions/ws", get(ws_decisions))
                 .route("/decisions/:id", get(get_decision))
@@ -289,6 +294,8 @@ fn run_configure(
         } else {
             Vec::new()
         },
+        organization: None,
+        workspaces: Vec::new(),
     };
 
     write_config_file(&cli.config, &config, force, dry_run)?;
@@ -413,23 +420,34 @@ fn dashboard_bytes(path: &str) -> &'static [u8] {
         .unwrap_or_else(|| b"")
 }
 
+#[derive(Debug, Deserialize)]
+struct SessionsQuery {
+    workspace_id: Option<String>,
+    token: Option<String>,
+}
+
 async fn list_sessions(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
+    Query(query): Query<SessionsQuery>,
 ) -> impl IntoResponse {
     if let Some(resp) = check_version(&headers) {
         return resp;
     }
-    if !authorized(&service, &headers, None) {
+    if !authorized(&service, &headers, query.token.as_deref()) {
         return (
             axum::http::StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "unauthorized" })),
         )
             .into_response();
     }
+    let mut sessions = fetch_sessions(&service).await;
+    if let Some(workspace_id) = query.workspace_id.as_deref() {
+        sessions = service.filter_sessions_by_workspace(sessions, workspace_id);
+    }
     (
         axum::http::StatusCode::OK,
-        Json(fetch_sessions(&service).await),
+        Json(sessions),
     )
         .into_response()
 }
@@ -496,6 +514,62 @@ async fn list_decisions(
         .await
     {
         Ok(decisions) => (axum::http::StatusCode::OK, Json(decisions)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn list_workspaces(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Query(query): Query<AuthQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, query.token.as_deref()) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service.list_workspaces().await {
+        Ok(workspaces) => (axum::http::StatusCode::OK, Json(workspaces)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn get_workspace(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Query(query): Query<AuthQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, query.token.as_deref()) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service.get_workspace(&id).await {
+        Ok(Some(workspace)) => (axum::http::StatusCode::OK, Json(workspace)).into_response(),
+        Ok(None) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "workspace not found" })),
+        )
+            .into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "error": err.to_string() })),
@@ -815,7 +889,7 @@ async fn metrics(State(service): State<Arc<HubService>>, headers: HeaderMap) -> 
 async fn ws_sessions(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
-    Query(query): Query<AuthQuery>,
+    Query(query): Query<SessionsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     if let Some(resp) = check_version(&headers) {
@@ -825,12 +899,19 @@ async fn ws_sessions(
         return (axum::http::StatusCode::UNAUTHORIZED, "unauthorized").into_response();
     }
     debug!("sessions ws connected");
-    ws.on_upgrade(move |socket| sessions_socket(service, socket))
+    ws.on_upgrade(move |socket| sessions_socket(service, query.workspace_id.clone(), socket))
 }
 
-async fn sessions_socket(service: Arc<HubService>, mut socket: WebSocket) {
+async fn sessions_socket(
+    service: Arc<HubService>,
+    workspace_id: Option<String>,
+    mut socket: WebSocket,
+) {
     loop {
-        let sessions = fetch_sessions(&service).await;
+        let mut sessions = fetch_sessions(&service).await;
+        if let Some(id) = workspace_id.as_deref() {
+            sessions = service.filter_sessions_by_workspace(sessions, id);
+        }
         if socket
             .send(Message::Text(serde_json::to_string(&sessions).unwrap()))
             .await
@@ -1579,6 +1660,13 @@ fn check_version(headers: &HeaderMap) -> Option<axum::response::Response> {
     }
 }
 
+async fn version() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "name": "forgehub",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
 fn version_compatible(client: &str) -> bool {
     let Some(client_major) = client
         .split('.')
@@ -1733,6 +1821,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -1794,6 +1884,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -1908,6 +2000,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -1951,6 +2045,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -1997,6 +2093,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2041,6 +2139,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2089,6 +2189,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2180,6 +2282,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2255,6 +2359,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2324,6 +2430,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2386,6 +2494,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2452,6 +2562,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2519,6 +2631,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2548,6 +2662,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: Vec::new(),
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),
@@ -2577,6 +2693,8 @@ mod tests {
                 data_dir: tmp.path().join("hub"),
                 edges: Vec::new(),
                 tokens: vec!["secret".to_string()],
+                organization: None,
+                workspaces: Vec::new(),
             })
             .await
             .unwrap(),

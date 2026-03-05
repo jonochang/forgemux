@@ -105,6 +105,7 @@ async fn health() -> Json<serde_json::Value> {
 #[derive(Debug, Serialize)]
 struct ConfigSummary {
     default_repo: Option<String>,
+    models_by_agent: std::collections::HashMap<String, Vec<String>>,
 }
 
 async fn config_summary<R: CommandRunner + 'static>(
@@ -133,6 +134,17 @@ async fn config_summary<R: CommandRunner + 'static>(
             .default_repo
             .as_ref()
             .map(|path| path.to_string_lossy().to_string()),
+        models_by_agent: service
+            .available_models_by_agent()
+            .into_iter()
+            .map(|(agent, models)| {
+                let key = match agent {
+                    forgemux_core::AgentType::Claude => "claude",
+                    forgemux_core::AgentType::Codex => "codex",
+                };
+                (key.to_string(), models)
+            })
+            .collect(),
     }))
 }
 

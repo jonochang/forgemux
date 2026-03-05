@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.1.22 - 2026-03-05
+
+- Add hub workspace seeding/config plus workspaces endpoints.
+- Add workspace-scoped session listing and repo-root mapping.
+- Add dashboard workspace switcher and workspace-scoped sessions/decisions.
+- Add BDD workspace scenarios, including HTTP integration coverage.
+
+## 0.1.21 - 2026-03-05
+
+- Add configurable model probe args with timeouts to avoid hanging `forged check`.
+- Stop running undocumented model probe commands by default.
+- Update default Codex model list to `gpt-5.3-codex` and `gpt-5.2-codex`.
+
+## 0.1.20 - 2026-03-05
+
+- Add forged doctor checks for model probe commands (claude/codex/gemini/opencode).
+- Auto-detect available models from installed agent tools and expose via edge config.
+
+## 0.1.19 - 2026-03-04
+
+- Add hub `/version` endpoint with discreet dashboard "about" link.
+- Add model preset dropdown (with custom override) when creating sessions.
+
 ## 0.1.18 - 2026-03-03
 
 - Add interactive `configure` flows for forgehub/forged plus `fmux configure`.

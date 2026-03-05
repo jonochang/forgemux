@@ -2,7 +2,7 @@ use anyhow::Context;
 use chrono::{DateTime, Utc};
 use forgemux_core::{
     Decision, DecisionAction, DecisionResolution, ReplayEvent, RiskLevel, SessionHubMeta,
-    SessionRecord, SessionStore, TestsStatus, sort_sessions,
+    SessionRecord, SessionStore, TestsStatus, Workspace, WorkspaceRepo, sort_sessions,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -17,9 +17,9 @@ use tracing::{debug, instrument, warn};
 mod db;
 mod risk;
 use db::{
-    decision_count, ensure_workspace, get_decision, init_db, insert_decision, insert_replay_event,
-    list_decisions, list_replay_events, log_budget_action, mark_edge_sessions_unreachable,
-    resolve_decision, upsert_session_cache,
+    decision_count, ensure_workspace, get_decision, get_workspace, init_db, insert_decision,
+    insert_replay_event, list_decisions, list_replay_events, list_workspaces, log_budget_action,
+    mark_edge_sessions_unreachable, resolve_decision, seed_workspaces, upsert_session_cache,
 };
 use risk::compute_risk;
 
@@ -46,6 +46,10 @@ pub struct HubConfig {
     pub edges: Vec<HubEdge>,
     #[serde(default)]
     pub tokens: Vec<String>,
+    #[serde(default)]
+    pub organization: Option<OrganizationSeed>,
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceSeed>,
 }
 
 impl HubConfig {
@@ -54,6 +58,34 @@ impl HubConfig {
         let cfg = toml::from_str(&data)?;
         Ok(cfg)
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrganizationSeed {
+    pub id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkspaceSeed {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub org_id: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub attention_budget_total: Option<u32>,
+    #[serde(default)]
+    pub repos: Vec<WorkspaceRepo>,
+    #[serde(default)]
+    pub members: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceRoots {
+    id: String,
+    roots: Vec<PathBuf>,
 }
 
 pub struct HubService {
@@ -65,6 +97,8 @@ pub struct HubService {
     decision_tx: broadcast::Sender<DecisionEvent>,
     decision_counter: Arc<Mutex<u64>>,
     edge_failures: Arc<Mutex<HashMap<String, u8>>>,
+    workspace_roots: Vec<WorkspaceRoots>,
+    default_workspace_id: String,
     #[allow(dead_code)]
     db: SqlitePool,
 }
@@ -73,8 +107,10 @@ impl HubService {
     #[instrument(skip(config))]
     pub async fn new(config: HubConfig) -> anyhow::Result<Self> {
         let db = init_db(&config.data_dir).await?;
+        seed_workspaces(&db, &config).await?;
         let (decision_tx, _) = broadcast::channel(100);
         let counter = decision_count(&db).await?;
+        let (workspace_roots, default_workspace_id) = workspace_roots_from_config(&config);
         Ok(Self {
             config,
             registry: Arc::new(Mutex::new(HashMap::new())),
@@ -84,12 +120,24 @@ impl HubService {
             decision_tx,
             decision_counter: Arc::new(Mutex::new(counter)),
             edge_failures: Arc::new(Mutex::new(HashMap::new())),
+            workspace_roots,
+            default_workspace_id,
             db,
         })
     }
 
     pub fn list_edges(&self) -> Vec<HubEdge> {
         self.config.edges.clone()
+    }
+
+    #[instrument(skip(self))]
+    pub async fn list_workspaces(&self) -> anyhow::Result<Vec<Workspace>> {
+        list_workspaces(&self.db).await
+    }
+
+    #[instrument(skip(self))]
+    pub async fn get_workspace(&self, id: &str) -> anyhow::Result<Option<Workspace>> {
+        get_workspace(&self.db, id).await
     }
 
     pub fn tokens_required(&self) -> bool {
@@ -173,6 +221,33 @@ impl HubService {
     pub fn list_registered_edges(&self) -> Vec<EdgeRegistration> {
         let guard = self.registry.lock().unwrap();
         guard.values().cloned().collect()
+    }
+
+    pub fn workspace_for_repo(&self, repo_root: &Path) -> String {
+        let mut best: Option<(String, usize)> = None;
+        for workspace in &self.workspace_roots {
+            for root in &workspace.roots {
+                if repo_root.starts_with(root) {
+                    let specificity = root.components().count();
+                    if best.as_ref().is_none_or(|(_, s)| specificity > *s) {
+                        best = Some((workspace.id.clone(), specificity));
+                    }
+                }
+            }
+        }
+        best.map(|(id, _)| id)
+            .unwrap_or_else(|| self.default_workspace_id.clone())
+    }
+
+    pub fn filter_sessions_by_workspace(
+        &self,
+        sessions: Vec<SessionRecord>,
+        workspace_id: &str,
+    ) -> Vec<SessionRecord> {
+        sessions
+            .into_iter()
+            .filter(|session| self.workspace_for_repo(&session.repo_root) == workspace_id)
+            .collect()
     }
 
     #[instrument(skip(self))]
@@ -424,6 +499,34 @@ impl HubService {
     }
 }
 
+fn workspace_roots_from_config(config: &HubConfig) -> (Vec<WorkspaceRoots>, String) {
+    let mut roots = Vec::new();
+    for workspace in &config.workspaces {
+        let repo_roots = workspace
+            .repos
+            .iter()
+            .filter_map(|repo| repo.root.as_ref())
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
+        roots.push(WorkspaceRoots {
+            id: workspace.id.clone(),
+            roots: repo_roots,
+        });
+    }
+    if roots.is_empty() {
+        roots.push(WorkspaceRoots {
+            id: "default".to_string(),
+            roots: Vec::new(),
+        });
+    }
+    let default_id = roots
+        .iter()
+        .find(|workspace| workspace.id == "default")
+        .map(|workspace| workspace.id.clone())
+        .unwrap_or_else(|| roots[0].id.clone());
+    (roots, default_id)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DecisionEvent {
     Created(Box<Decision>),
@@ -502,6 +605,8 @@ mod tests {
                 },
             ],
             tokens: Vec::new(),
+            organization: None,
+            workspaces: Vec::new(),
         })
         .await
         .unwrap();
@@ -518,6 +623,8 @@ mod tests {
             data_dir: tmp.path().join("hub"),
             edges: vec![],
             tokens: Vec::new(),
+            organization: None,
+            workspaces: Vec::new(),
         })
         .await
         .unwrap();
@@ -537,6 +644,8 @@ mod tests {
             data_dir: tmp.path().join("hub"),
             edges: vec![],
             tokens: Vec::new(),
+            organization: None,
+            workspaces: Vec::new(),
         })
         .await
         .unwrap();
@@ -570,6 +679,8 @@ mod tests {
             data_dir: tmp.path().join("hub"),
             edges: vec![],
             tokens: Vec::new(),
+            organization: None,
+            workspaces: Vec::new(),
         })
         .await
         .unwrap();

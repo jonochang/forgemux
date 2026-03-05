@@ -12,6 +12,8 @@ pub struct WorkspaceRepo {
     pub label: String,
     pub icon: String,
     pub color: String,
+    #[serde(default)]
+    pub root: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -46,6 +48,7 @@ mod tests {
                 label: "forgemux".to_string(),
                 icon: "hammer".to_string(),
                 color: "#111111".to_string(),
+                root: Some("/repos/forgemux".to_string()),
             }],
             members: vec!["jono".to_string()],
             attention_budget: AttentionBudget {

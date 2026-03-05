@@ -22,7 +22,19 @@ export function AttachView({ sessions, initialSessionId }) {
   const [edges, setEdges] = useState([]);
   const [edgeId, setEdgeId] = useState("");
   const [agent, setAgent] = useState("claude");
+  const defaultModelOptionsByAgent = {
+    claude: ["sonnet", "opus", "haiku"],
+    codex: ["o3"],
+  };
+  const [modelsByAgent, setModelsByAgent] = useState(defaultModelOptionsByAgent);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const modelOptions = modelsLoaded
+    ? modelsByAgent[agent] || []
+    : defaultModelOptionsByAgent[agent] || [];
   const [model, setModel] = useState("sonnet");
+  const [modelPreset, setModelPreset] = useState(() =>
+    modelOptions.includes("sonnet") ? "sonnet" : "custom"
+  );
   const [repo, setRepo] = useState("");
   const [name, setName] = useState("");
   const [worktree, setWorktree] = useState(true);
@@ -54,17 +66,34 @@ export function AttachView({ sessions, initialSessionId }) {
 
   useEffect(() => {
     if (!edgeId) return;
+    setModelsLoaded(false);
+    setModelsByAgent(defaultModelOptionsByAgent);
     api
       .edgeConfig(edgeId)
       .then((data) => {
         if (!repoTouched && data?.default_repo) {
           setRepo(data.default_repo);
         }
+        if (data?.models_by_agent) {
+          setModelsByAgent(data.models_by_agent);
+          setModelsLoaded(true);
+        }
       })
       .catch(() => {
         // ignore
       });
-  }, [edgeId, repoTouched]);
+  }, [edgeId]);
+
+  useEffect(() => {
+    if (modelPreset === "custom") return;
+    if (!modelOptions.includes(model)) {
+      const fallback = modelOptions[0] || "custom";
+      setModelPreset(fallback === "custom" ? "custom" : fallback);
+      setModel(fallback === "custom" ? "" : fallback);
+      return;
+    }
+    setModelPreset(model);
+  }, [agent, model, modelPreset, modelOptions]);
 
   const flushPending = useCallback(() => {
     const ws = wsRef.current;
@@ -303,10 +332,17 @@ export function AttachView({ sessions, initialSessionId }) {
             <option value="claude">Claude</option>
             <option value="codex">Codex</option>
           </select>
-          <input
-            value=${model}
-            onInput=${(e) => setModel(e.target.value)}
-            placeholder="Model"
+          <select
+            value=${modelPreset}
+            onChange=${(e) => {
+              const next = e.target.value;
+              setModelPreset(next);
+              if (next === "custom") {
+                setModel("");
+              } else {
+                setModel(next);
+              }
+            }}
             style=${{
               background: T.bg2,
               border: `1px solid ${T.border}`,
@@ -315,7 +351,24 @@ export function AttachView({ sessions, initialSessionId }) {
               borderRadius: "6px",
               fontSize: "12px",
             }}
-          />
+          >
+            ${modelOptions.map((option) => html`<option value=${option}>${option}</option>`)}
+            <option value="custom">Custom...</option>
+          </select>
+          ${modelPreset === "custom" &&
+          html`<input
+            value=${model}
+            onInput=${(e) => setModel(e.target.value)}
+            placeholder="Custom model"
+            style=${{
+              background: T.bg2,
+              border: `1px solid ${T.border}`,
+              color: T.t1,
+              padding: "6px 8px",
+              borderRadius: "6px",
+              fontSize: "12px",
+            }}
+          />`}
           <input
             value=${repo}
             onInput=${(e) => {

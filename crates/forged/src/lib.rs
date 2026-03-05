@@ -12,7 +12,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 
 mod agent;
 pub mod checks;
@@ -23,6 +23,14 @@ use agent::{AgentAdapter, AgentLogSignal, ConfigAdapter};
 
 pub trait CommandRunner: Send + Sync {
     fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output>;
+    fn run_with_timeout(
+        &self,
+        program: &str,
+        args: &[String],
+        _timeout: Duration,
+    ) -> std::io::Result<Output> {
+        self.run(program, args)
+    }
 }
 
 #[derive(Clone)]
@@ -31,6 +39,34 @@ pub struct OsCommandRunner;
 impl CommandRunner for OsCommandRunner {
     fn run(&self, program: &str, args: &[String]) -> std::io::Result<Output> {
         Command::new(program).args(args).output()
+    }
+
+    fn run_with_timeout(
+        &self,
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+    ) -> std::io::Result<Output> {
+        use std::process::Stdio;
+        let mut child = Command::new(program)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let start = Instant::now();
+        loop {
+            if let Some(_status) = child.try_wait()? {
+                return child.wait_with_output();
+            }
+            if start.elapsed() >= timeout {
+                let _ = child.kill();
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "command timed out",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 }
 
@@ -118,8 +154,10 @@ impl CommandRunner for FakeRunner {
 pub struct AgentConfig {
     pub command: String,
     pub args: Vec<String>,
+    pub models_probe_args: Option<Vec<String>>,
     pub prompt_patterns: Vec<String>,
     pub usage_paths: Vec<String>,
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -240,10 +278,16 @@ impl ForgedConfig {
             AgentConfig {
                 command: "claude".to_string(),
                 args: vec!["--dangerously-skip-permissions".to_string()],
+                models_probe_args: None,
                 prompt_patterns: vec![r"(?m)^>\s*$".to_string()],
                 usage_paths: vec![
                     "~/.config/claude/projects/".to_string(),
                     "~/.claude/projects/".to_string(),
+                ],
+                models: vec![
+                    "sonnet".to_string(),
+                    "opus".to_string(),
+                    "haiku".to_string(),
                 ],
             },
         );
@@ -252,8 +296,10 @@ impl ForgedConfig {
             AgentConfig {
                 command: "codex".to_string(),
                 args: vec![],
+                models_probe_args: None,
                 prompt_patterns: vec![r"(?m)^(?:> |\$ )".to_string()],
                 usage_paths: vec!["~/.codex/sessions/".to_string()],
+                models: vec!["gpt-5.3-codex".to_string(), "gpt-5.2-codex".to_string()],
             },
         );
 
@@ -329,11 +375,17 @@ impl ForgedConfig {
                 if let Some(args) = agent.args {
                     entry.args = args;
                 }
+                if let Some(models_probe_args) = agent.models_probe_args {
+                    entry.models_probe_args = Some(models_probe_args);
+                }
                 if let Some(prompt_patterns) = agent.prompt_patterns {
                     entry.prompt_patterns = prompt_patterns;
                 }
                 if let Some(usage_paths) = agent.usage_paths {
                     entry.usage_paths = usage_paths;
+                }
+                if let Some(models) = agent.models {
+                    entry.models = models;
                 }
             }
         }
@@ -408,8 +460,10 @@ pub struct PolicyConfig {
 struct AgentFile {
     pub command: Option<String>,
     pub args: Option<Vec<String>>,
+    pub models_probe_args: Option<Vec<String>>,
     pub prompt_patterns: Option<Vec<String>>,
     pub usage_paths: Option<Vec<String>>,
+    pub models: Option<Vec<String>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -466,6 +520,82 @@ fn convert_hooks(hooks: Option<Vec<NotificationHookFile>>) -> Vec<NotificationHo
         .collect()
 }
 
+pub(crate) const MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+pub(crate) fn probe_models_for_command<R: CommandRunner>(
+    runner: &R,
+    command: &str,
+    base_args: &[String],
+    probe_args: &[String],
+) -> Vec<String> {
+    let mut args = base_args.to_vec();
+    args.extend_from_slice(probe_args);
+    let output = match runner.run_with_timeout(command, &args, MODEL_PROBE_TIMEOUT) {
+        Ok(output) => output,
+        Err(_) => return Vec::new(),
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    parse_models_output(&text)
+}
+
+pub(crate) fn parse_models_output(text: &str) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.starts_with('[')
+        && let Ok(list) = serde_json::from_str::<Vec<String>>(trimmed)
+    {
+        return list;
+    }
+    if trimmed.starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        if let Some(models) = value.get("models").and_then(|value| value.as_array()) {
+            return models
+                .iter()
+                .filter_map(|entry| entry.as_str().map(|value| value.to_string()))
+                .collect();
+        }
+        if let Some(data) = value.get("data").and_then(|value| value.as_array()) {
+            let mut out = Vec::new();
+            for entry in data {
+                if let Some(id) = entry.get("id").and_then(|value| value.as_str()) {
+                    out.push(id.to_string());
+                }
+            }
+            if !out.is_empty() {
+                return out;
+            }
+        }
+    }
+
+    let token_re = Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]*$").unwrap();
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let token = line.split_whitespace().next().unwrap_or("");
+        if token.is_empty() {
+            continue;
+        }
+        let lower = token.to_ascii_lowercase();
+        if matches!(lower.as_str(), "model" | "models" | "id" | "name") {
+            continue;
+        }
+        if token_re.is_match(token) && seen.insert(token.to_string()) {
+            out.push(token.to_string());
+        }
+    }
+    out
+}
+
 pub struct SessionService<R: CommandRunner> {
     config: ForgedConfig,
     runner: R,
@@ -475,6 +605,7 @@ pub struct SessionService<R: CommandRunner> {
     stream_manager: stream::StreamManager,
     adapters: AgentAdapters,
     log_watcher: std::sync::Mutex<LogWatcher>,
+    models_cache: std::sync::Mutex<HashMap<AgentType, Vec<String>>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -523,6 +654,7 @@ impl<R: CommandRunner> SessionService<R> {
             stream_manager: stream::StreamManager::new(ring_capacity, dedup_window),
             adapters,
             log_watcher: std::sync::Mutex::new(LogWatcher::default()),
+            models_cache: std::sync::Mutex::new(HashMap::new()),
         }
     }
 
@@ -532,6 +664,43 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn stream_manager(&self) -> stream::StreamManager {
         self.stream_manager.clone()
+    }
+
+    pub fn available_models_by_agent(&self) -> HashMap<AgentType, Vec<String>> {
+        let mut result = HashMap::new();
+        for (agent, config) in &self.config.agents {
+            if let Some(cached) = self.models_cache.lock().unwrap().get(agent).cloned() {
+                result.insert(agent.clone(), cached);
+                continue;
+            }
+            let probed = config
+                .models_probe_args
+                .as_ref()
+                .map(|probe_args| {
+                    probe_models_for_command(
+                        &self.runner,
+                        &config.command,
+                        &config.args,
+                        probe_args,
+                    )
+                })
+                .unwrap_or_default();
+            let models = if probed.is_empty() {
+                config.models.clone()
+            } else {
+                probed
+            };
+            self.models_cache
+                .lock()
+                .unwrap()
+                .insert(agent.clone(), models.clone());
+            result.insert(agent.clone(), models);
+        }
+        result
+    }
+
+    pub fn doctor_checks(&self) -> Vec<checks::CheckItem> {
+        checks::run_checks_with_runner(&self.config, &self.runner)
     }
 
     pub fn acquire_pid_lock(&self) -> anyhow::Result<PidLock> {

@@ -1,6 +1,10 @@
-use crate::{AgentConfig, ForgedConfig};
+use crate::{
+    AgentConfig, AgentType, CommandRunner, ForgedConfig, MODEL_PROBE_TIMEOUT, parse_models_output,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+type ModelProbeConfig<'a> = Option<(&'a str, &'a [String], Option<&'a [String]>)>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckItem {
@@ -16,6 +20,42 @@ pub fn run_checks(config: &ForgedConfig) -> Vec<CheckItem> {
     for (agent, cfg) in &config.agents {
         items.push(check_agent(agent, cfg));
     }
+    items
+}
+
+pub fn run_checks_with_runner<R: CommandRunner>(
+    config: &ForgedConfig,
+    runner: &R,
+) -> Vec<CheckItem> {
+    let mut items = run_checks(config);
+    let claude = config.agents.get(&AgentType::Claude);
+    let codex = config.agents.get(&AgentType::Codex);
+    items.push(check_model_probe(
+        "Claude",
+        claude.map(|cfg| {
+            (
+                cfg.command.as_str(),
+                cfg.args.as_slice(),
+                cfg.models_probe_args.as_deref(),
+            )
+        }),
+        "claude",
+        runner,
+    ));
+    items.push(check_model_probe(
+        "Codex",
+        codex.map(|cfg| {
+            (
+                cfg.command.as_str(),
+                cfg.args.as_slice(),
+                cfg.models_probe_args.as_deref(),
+            )
+        }),
+        "codex",
+        runner,
+    ));
+    items.push(check_model_probe("Gemini", None, "gemini", runner));
+    items.push(check_model_probe("OpenCode", None, "opencode", runner));
     items
 }
 
@@ -74,6 +114,89 @@ fn check_agent(agent: &crate::AgentType, cfg: &AgentConfig) -> CheckItem {
             name,
             ok: false,
             message: format!("not found: {}", cfg.command),
+        },
+    }
+}
+
+fn check_model_probe<R: CommandRunner>(
+    label: &str,
+    config: ModelProbeConfig<'_>,
+    fallback_command: &str,
+    runner: &R,
+) -> CheckItem {
+    let name = format!("{label} models probe");
+    let (command, base_args, probe_args) = config.unwrap_or((fallback_command, &[], None));
+    match resolve_program(command) {
+        Some(path) => match probe_args {
+            Some(probe_args) if !probe_args.is_empty() => {
+                eprintln!(
+                    "checking {label} models with `{}`",
+                    std::iter::once(command)
+                        .chain(base_args.iter().map(|value| value.as_str()))
+                        .chain(probe_args.iter().map(|value| value.as_str()))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                );
+                let mut models = Vec::new();
+                let mut timed_out = false;
+                let output = match runner.run_with_timeout(
+                    command,
+                    &base_args
+                        .iter()
+                        .cloned()
+                        .chain(probe_args.iter().cloned())
+                        .collect::<Vec<_>>(),
+                    MODEL_PROBE_TIMEOUT,
+                ) {
+                    Ok(output) => output,
+                    Err(err) => {
+                        if err.kind() == std::io::ErrorKind::TimedOut {
+                            timed_out = true;
+                        }
+                        return CheckItem {
+                            name,
+                            ok: false,
+                            message: if timed_out {
+                                "probe timed out (try logging in to the CLI first)".to_string()
+                            } else {
+                                "probe failed".to_string()
+                            },
+                        };
+                    }
+                };
+                if output.status.success() {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    models = parse_models_output(&text);
+                }
+                if models.is_empty() {
+                    CheckItem {
+                        name,
+                        ok: false,
+                        message: "probe returned no models".to_string(),
+                    }
+                } else {
+                    let preview = if models.len() > 6 {
+                        format!("{} (+{} more)", models[..6].join(", "), models.len() - 6)
+                    } else {
+                        models.join(", ")
+                    };
+                    CheckItem {
+                        name,
+                        ok: true,
+                        message: format!("{} ({})", path.display(), preview),
+                    }
+                }
+            }
+            _ => CheckItem {
+                name,
+                ok: true,
+                message: format!("{} (probe not configured)", path.display()),
+            },
+        },
+        None => CheckItem {
+            name,
+            ok: true,
+            message: format!("not installed: {command}"),
         },
     }
 }
