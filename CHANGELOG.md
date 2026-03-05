@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.24 - 2026-03-05
+
+- Add chromiumoxide-driven dashboard BDD coverage for model selection.
+- Pass selected model to Claude/Codex commands when starting sessions.
+- Add stable test ids for attach/start UI controls.
+
 ## 0.1.23 - 2026-03-05
 
 - Fix model dropdown selection syncing and session name payloads in the dashboard.

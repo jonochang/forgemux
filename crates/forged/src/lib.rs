@@ -859,6 +859,7 @@ impl<R: CommandRunner> SessionService<R> {
             agent_cfg.command.clone(),
         ];
         args.extend(agent_cfg.args.iter().cloned());
+        append_model_arg(&mut args, &agent, &record.model);
 
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
@@ -946,6 +947,7 @@ impl<R: CommandRunner> SessionService<R> {
             agent_cfg.command.clone(),
         ];
         args.extend(agent_cfg.args.iter().cloned());
+        append_model_arg(&mut args, &agent, &record.model);
 
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
@@ -2204,6 +2206,21 @@ fn agent_tmux_name(agent: &AgentType) -> &'static str {
     }
 }
 
+fn append_model_arg(args: &mut Vec<String>, agent: &AgentType, model: &str) {
+    if args
+        .iter()
+        .any(|arg| arg == "--model" || arg == "-m" || arg.starts_with("--model="))
+    {
+        return;
+    }
+    match agent {
+        AgentType::Claude | AgentType::Codex => {
+            args.push("--model".to_string());
+            args.push(model.to_string());
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 struct NotificationDelivery {
     ts: DateTime<Utc>,
@@ -2347,6 +2364,27 @@ mod tests {
                 && call.contains(&tmux_name.to_string())
                 && call.contains(&"-n".to_string())
                 && call.contains(&"claude".to_string())
+        }));
+    }
+
+    #[test]
+    fn start_session_passes_model_arg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner.clone());
+
+        let record = service
+            .start_session(AgentType::Claude, "haiku", tmp.path())
+            .unwrap();
+
+        let calls = runner.calls();
+        let tmux_name = record.tmux_session.as_ref().expect("tmux session");
+        assert!(calls.iter().any(|call| {
+            call.contains(&"new-session".to_string())
+                && call.contains(&tmux_name.to_string())
+                && call.contains(&"--model".to_string())
+                && call.contains(&"haiku".to_string())
         }));
     }
 

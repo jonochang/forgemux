@@ -301,6 +301,7 @@ export function AttachView({ sessions, initialSessionId }) {
         <${SectionLabel}>Start Session</${SectionLabel}>
         <div style=${{ display: "grid", gap: "8px", marginTop: "10px" }}>
           <select
+            data-testid="edge-select"
             value=${edgeId}
             onChange=${(e) => setEdgeId(e.target.value)}
             style=${{
@@ -320,6 +321,7 @@ export function AttachView({ sessions, initialSessionId }) {
             )}
           </select>
           <select
+            data-testid="agent-select"
             value=${agent}
             onChange=${(e) => setAgent(e.target.value)}
             style=${{
@@ -335,6 +337,7 @@ export function AttachView({ sessions, initialSessionId }) {
             <option value="codex">Codex</option>
           </select>
           <select
+            data-testid="model-select"
             value=${modelPreset}
             onChange=${(e) => {
               const next = e.target.value;
@@ -359,6 +362,7 @@ export function AttachView({ sessions, initialSessionId }) {
           </select>
           ${modelPreset === "custom" &&
           html`<input
+            data-testid="model-custom-input"
             value=${model}
             onInput=${(e) => setModel(e.target.value)}
             placeholder="Custom model"
@@ -372,6 +376,7 @@ export function AttachView({ sessions, initialSessionId }) {
             }}
           />`}
           <input
+            data-testid="repo-input"
             value=${repo}
             onInput=${(e) => {
               setRepoTouched(true);
@@ -388,6 +393,7 @@ export function AttachView({ sessions, initialSessionId }) {
             }}
           />
           <input
+            data-testid="name-input"
             value=${name}
             onInput=${(e) => setName(e.target.value)}
             placeholder="Session name (optional)"
@@ -421,6 +427,7 @@ export function AttachView({ sessions, initialSessionId }) {
           ${createError &&
           html`<div style=${{ color: T.err, fontSize: "11px" }}>${createError}</div>`}
           <button
+            data-testid="start-session"
             onClick=${startSession}
             disabled=${creating || edges.length === 0}
             style=${{

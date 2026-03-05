@@ -12,7 +12,7 @@
 
 rustPlatform.buildRustPackage {
   pname = "forgemux";
-  version = "0.1.23";
+  version = "0.1.24";
 
   src = ./.;
 
