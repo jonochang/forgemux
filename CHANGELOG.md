@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.23 - 2026-03-05
+
+- Fix model dropdown selection syncing and session name payloads in the dashboard.
+- Persist session name/goal when starting a session across the edge workflow.
+- Add BDD session creation scenario covering name + model selection.
+
 ## 0.1.22 - 2026-03-05
 
 - Add hub workspace seeding/config plus workspaces endpoints.
