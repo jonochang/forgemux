@@ -11,7 +11,7 @@ It includes:
 
 - `fmux` CLI: start/attach/list sessions, watch state, foreman scaffolding
 - `forged` edge service: tmux lifecycle + transcript capture + state detection
-- `forgehub` hub service: basic session aggregation + dashboard placeholder
+- `forgehub` hub service: session aggregation + API + embedded dashboard
 - Nix flake dev shell with Rust toolchain and common build tools
 
 ## Development
@@ -126,25 +126,50 @@ forgehub configure --non-interactive
 forged configure --non-interactive
 ```
 
-1. Run the hub:
+1. Configure the hub (edit `./.forgemux-hub.toml` as needed):
+
+```toml
+data_dir = "./.forgemux-hub"
+tokens = []
+
+[organization]
+id = "org-default"
+name = "Default Org"
+
+[[workspaces]]
+id = "default"
+name = "Default Workspace"
+timezone = "UTC"
+attention_budget_total = 12
+members = ["operator"]
+
+[[workspaces.repos]]
+id = "forgemux"
+label = "Forgemux"
+icon = "hammer"
+color = "#111111"
+root = "/repos/forgemux"
+```
+
+2. Run the hub:
 
 ```sh
 forgehub --bind 127.0.0.1:8080 --config ./.forgemux-hub.toml run
 ```
 
-2. Run the edge with hub registration:
+3. Run the edge with hub registration:
 
 ```sh
 forged run --data-dir ./.forgemux --bind 127.0.0.1:9090 --config ./forged.toml
 ```
 
-3. Start a session via the hub:
+4. Start a session via the hub:
 
 ```sh
 fmux --hub http://127.0.0.1:8080 start --agent claude --model sonnet --repo .
 ```
 
-4. Open the dashboard:
+5. Open the dashboard:
 
 ```sh
 open http://127.0.0.1:8080
@@ -182,6 +207,25 @@ fmux --hub http://127.0.0.1:8080 --token dev-token ls
 
 ```toml
 data_dir = "./.forgemux-hub"
+tokens = []
+
+[organization]
+id = "org-default"
+name = "Default Org"
+
+[[workspaces]]
+id = "default"
+name = "Default Workspace"
+timezone = "UTC"
+attention_budget_total = 12
+members = ["operator"]
+
+[[workspaces.repos]]
+id = "forgemux"
+label = "Forgemux"
+icon = "hammer"
+color = "#111111"
+root = "/repos/forgemux"
 
 [[edges]]
 id = "edge-01"
@@ -209,10 +253,10 @@ curl http://127.0.0.1:8080/metrics
 - `crates/fmux`: CLI
 - `crates/forged`: edge daemon
 - `crates/forgehub`: hub server
-- `dashboard/`: static dashboard placeholder
+- `dashboard/`: embedded SPA served by forgehub
 
 ## Notes
 
-This is a scaffold that covers Phase 0–5 at a minimal functional level. Some components
-(e.g., hub gRPC, PTY websocket bridge, real foreman reports, webhook notifications) are
-placeholders and need deeper implementation.
+This is a scaffold that covers early roadmap phases with working CLI, edge, hub, and
+dashboard flows. Some components (e.g., hub gRPC, PTY websocket bridge, real foreman
+reports, webhook notifications) are placeholders and need deeper implementation.

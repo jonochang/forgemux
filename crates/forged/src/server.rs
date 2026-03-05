@@ -34,6 +34,7 @@ pub struct StartRequest {
     pub worktree_path: Option<String>,
     pub notify: Option<Vec<String>>,
     pub policy: Option<String>,
+    pub goal: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -272,6 +273,7 @@ async fn start_session<R: CommandRunner + 'static>(
         worktree_spec,
         notify,
         req.policy,
+        req.goal,
     ) {
         Ok(record) => Ok(Json(StartResponse {
             session_id: record.id.as_str().to_string(),

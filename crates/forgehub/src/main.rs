@@ -445,11 +445,7 @@ async fn list_sessions(
     if let Some(workspace_id) = query.workspace_id.as_deref() {
         sessions = service.filter_sessions_by_workspace(sessions, workspace_id);
     }
-    (
-        axum::http::StatusCode::OK,
-        Json(sessions),
-    )
-        .into_response()
+    (axum::http::StatusCode::OK, Json(sessions)).into_response()
 }
 
 #[derive(Debug, Deserialize)]

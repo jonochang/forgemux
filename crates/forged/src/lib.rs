@@ -766,7 +766,7 @@ impl<R: CommandRunner> SessionService<R> {
         model: impl Into<String>,
         repo_path: impl AsRef<Path>,
     ) -> anyhow::Result<SessionRecord> {
-        self.start_session_with_worktree(agent, model, repo_path, None, None, None, None)
+        self.start_session_with_worktree(agent, model, repo_path, None, None, None, None, None)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -779,6 +779,7 @@ impl<R: CommandRunner> SessionService<R> {
         worktree: Option<WorktreeSpec>,
         notify: Option<Vec<NotificationKind>>,
         policy: Option<String>,
+        goal: Option<String>,
     ) -> anyhow::Result<SessionRecord> {
         if self.is_draining() {
             anyhow::bail!("forged is draining; no new sessions allowed");
@@ -819,6 +820,11 @@ impl<R: CommandRunner> SessionService<R> {
             normalize_tmux_session_name(&truncate_session_name(&normalized_name, 20));
         let tmux_name = self.allocate_tmux_session_name(&base_tmux_name);
         record.tmux_session = Some(tmux_name.clone());
+        if let Some(goal) = goal.clone()
+            && !goal.trim().is_empty()
+        {
+            record.goal = Some(goal);
+        }
         if let Some(policy_name) = policy.clone() {
             if !self.config.policies.contains_key(&policy_name) {
                 anyhow::bail!("unknown policy: {}", policy_name);
@@ -2918,6 +2924,7 @@ mod tests {
                 None,
                 Some(vec![NotificationKind::Desktop]),
                 None,
+                None,
             )
             .unwrap();
 
@@ -2958,6 +2965,7 @@ mod tests {
             None,
             None,
             Some("restricted".to_string()),
+            None,
         );
         assert!(result.is_err());
     }
@@ -2974,7 +2982,16 @@ mod tests {
         let service = SessionService::new(config, runner);
 
         let record = service
-            .start_session_with_worktree(AgentType::Claude, "sonnet", "", None, None, None, None)
+            .start_session_with_worktree(
+                AgentType::Claude,
+                "sonnet",
+                "",
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap();
         assert_eq!(record.repo_root, repo);
     }

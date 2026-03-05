@@ -2,14 +2,14 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use cucumber::{given, then, when, World};
+use cucumber::{World, given, then, when};
 use forgehub::{HubConfig, HubService, OrganizationSeed, WorkspaceSeed};
 use forgemux_core::{AgentType, SessionRecord, Workspace, WorkspaceRepo};
 use futures_util::future::join_all;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::TempDir;
 
 #[derive(Default, World)]
@@ -25,9 +25,11 @@ struct HubWorld {
     last_sessions: Vec<SessionRecord>,
     last_http_workspaces: Vec<Workspace>,
     last_http_sessions: Vec<SessionRecord>,
+    last_start_payload: Option<serde_json::Value>,
     hub_base_url: Option<String>,
     edge_addr: Option<String>,
     edge_sessions: Vec<SessionRecord>,
+    start_capture: Option<Arc<Mutex<Option<serde_json::Value>>>>,
     tempdir: Option<TempDir>,
 }
 
@@ -44,6 +46,7 @@ impl std::fmt::Debug for HubWorld {
             .field("last_sessions_len", &self.last_sessions.len())
             .field("last_http_workspaces_len", &self.last_http_workspaces.len())
             .field("last_http_sessions_len", &self.last_http_sessions.len())
+            .field("last_start_payload", &self.last_start_payload)
             .field("hub_base_url", &self.hub_base_url)
             .field("edge_addr", &self.edge_addr)
             .finish()
@@ -92,7 +95,10 @@ impl HubWorld {
             .route("/edges/register", post(register_edge_http))
             .route("/workspaces", get(list_workspaces_http))
             .route("/workspaces/:id", get(get_workspace_http))
-            .route("/sessions", get(list_sessions_http))
+            .route(
+                "/sessions",
+                get(list_sessions_http).post(start_session_http),
+            )
             .with_state(service);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
@@ -157,6 +163,45 @@ async fn list_sessions_http(
     Ok(Json(sessions))
 }
 
+async fn start_session_http(
+    State(service): State<Arc<HubService>>,
+    Json(mut payload): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let edge_id = payload
+        .get("edge_id")
+        .and_then(|value| value.as_str())
+        .map(|value| value.to_string());
+    if let Some(obj) = payload.as_object_mut() {
+        obj.remove("edge_id");
+    }
+    let edge = if let Some(edge_id) = edge_id {
+        service
+            .list_registered_edges()
+            .into_iter()
+            .find(|edge| edge.id == edge_id)
+    } else {
+        service.pick_edge()
+    };
+    let edge = edge.ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let url = format!("{}/sessions/start", normalize_http_addr(&edge.addr));
+    let resp = reqwest::Client::new()
+        .post(url)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let status = resp.status();
+    let body = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({ "error": "invalid response" }));
+    if status.is_success() {
+        Ok(Json(body))
+    } else {
+        Err(StatusCode::BAD_GATEWAY)
+    }
+}
+
 async fn fetch_sessions_http(service: &HubService) -> Vec<SessionRecord> {
     let client = reqwest::Client::new();
     let edges = service.list_registered_edges();
@@ -190,7 +235,9 @@ async fn given_no_workspaces(world: &mut HubWorld) {
     world.org = None;
 }
 
-#[given(regex = r#"^a hub with workspace "([^"]+)" named "([^"]+)" and repo "([^"]+)" labeled "([^"]+)" rooted at "([^"]+)"$"#)]
+#[given(
+    regex = r#"^a hub with workspace "([^"]+)" named "([^"]+)" and repo "([^"]+)" labeled "([^"]+)" rooted at "([^"]+)"$"#
+)]
 async fn given_workspace_with_repo(
     world: &mut HubWorld,
     workspace_id: String,
@@ -229,7 +276,9 @@ async fn given_sessions_exist(world: &mut HubWorld, repo_a: String, repo_b: Stri
     world.sessions = vec![session_a, session_b];
 }
 
-#[given(regex = r#"^a hub server with workspace "([^"]+)" named "([^"]+)" and repo "([^"]+)" labeled "([^"]+)" rooted at "([^"]+)"$"#)]
+#[given(
+    regex = r#"^a hub server with workspace "([^"]+)" named "([^"]+)" and repo "([^"]+)" labeled "([^"]+)" rooted at "([^"]+)"$"#
+)]
 async fn given_hub_server_with_workspace(
     world: &mut HubWorld,
     workspace_id: String,
@@ -238,7 +287,15 @@ async fn given_hub_server_with_workspace(
     repo_label: String,
     repo_root: String,
 ) -> anyhow::Result<()> {
-    given_workspace_with_repo(world, workspace_id, workspace_name, repo_id, repo_label, repo_root).await;
+    given_workspace_with_repo(
+        world,
+        workspace_id,
+        workspace_name,
+        repo_id,
+        repo_label,
+        repo_root,
+    )
+    .await;
     Ok(())
 }
 
@@ -266,6 +323,27 @@ async fn given_edge_server_sessions(
         axum::serve(listener, edge_app).await.unwrap();
     });
     world.edge_addr = Some(addr.to_string());
+    Ok(())
+}
+
+#[given(regex = r#"^an edge server accepts session starts$"#)]
+async fn given_edge_server_accepts_starts(world: &mut HubWorld) -> anyhow::Result<()> {
+    let capture = Arc::new(Mutex::new(None));
+    let capture_clone = Arc::clone(&capture);
+    let edge_app = Router::new().route(
+        "/sessions/start",
+        post(move |Json(payload): Json<serde_json::Value>| async move {
+            *capture_clone.lock().unwrap() = Some(payload);
+            Json(serde_json::json!({ "session_id": "S-EDGE" }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        axum::serve(listener, edge_app).await.unwrap();
+    });
+    world.edge_addr = Some(addr.to_string());
+    world.start_capture = Some(capture);
     Ok(())
 }
 
@@ -307,6 +385,35 @@ async fn when_register_edge(world: &mut HubWorld) -> anyhow::Result<()> {
         .await?;
     if !resp.status().is_success() {
         anyhow::bail!("edge register failed: {}", resp.status());
+    }
+    Ok(())
+}
+
+#[when(regex = r#"^I start a session named "([^"]+)" with model "([^"]+)"$"#)]
+async fn when_start_session_named_model(
+    world: &mut HubWorld,
+    name: String,
+    model: String,
+) -> anyhow::Result<()> {
+    world.ensure_hub_server().await?;
+    let hub = world.hub_base_url.as_ref().unwrap();
+    let payload = serde_json::json!({
+        "edge_id": "edge-01",
+        "agent": "claude",
+        "model": model,
+        "name": name,
+        "repo": "/repos/a",
+        "worktree": false,
+        "branch": null
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{hub}/sessions"))
+        .json(&payload)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("start session failed: {}", resp.status());
     }
     Ok(())
 }
@@ -359,7 +466,8 @@ async fn when_list_sessions_for_workspace(
 ) -> anyhow::Result<()> {
     world.ensure_service().await?;
     let service = world.service.as_ref().unwrap();
-    world.last_sessions = service.filter_sessions_by_workspace(world.sessions.clone(), &workspace_id);
+    world.last_sessions =
+        service.filter_sessions_by_workspace(world.sessions.clone(), &workspace_id);
     Ok(())
 }
 
@@ -388,19 +496,29 @@ async fn then_workspace_has_repo(world: &mut HubWorld, repo_id: String, label: S
 
 #[then(regex = r#"^the HTTP workspace list contains "([^"]+)" and "([^"]+)"$"#)]
 async fn then_http_workspaces_contain(world: &mut HubWorld, a: String, b: String) {
-    let ids: Vec<_> = world.last_http_workspaces.iter().map(|ws| ws.id.as_str()).collect();
+    let ids: Vec<_> = world
+        .last_http_workspaces
+        .iter()
+        .map(|ws| ws.id.as_str())
+        .collect();
     assert!(ids.contains(&a.as_str()), "expected workspace {a}");
     assert!(ids.contains(&b.as_str()), "expected workspace {b}");
 }
 
 #[then(regex = r#"^the active workspace is "([^"]+)"$"#)]
 async fn then_active_workspace_is(world: &mut HubWorld, expected: String) {
-    assert_eq!(world.selected_workspace_id.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        world.selected_workspace_id.as_deref(),
+        Some(expected.as_str())
+    );
 }
 
 #[then(regex = r#"^the resolved workspace id is "([^"]+)"$"#)]
 async fn then_resolved_workspace_is(world: &mut HubWorld, expected: String) {
-    assert_eq!(world.resolved_workspace_id.as_deref(), Some(expected.as_str()));
+    assert_eq!(
+        world.resolved_workspace_id.as_deref(),
+        Some(expected.as_str())
+    );
 }
 
 #[then(regex = r#"^the session list contains session for repo root "([^"]+)"$"#)]
@@ -437,6 +555,20 @@ async fn then_http_sessions_exclude_repo(world: &mut HubWorld, repo_root: String
         .iter()
         .any(|session| session.repo_root == Path::new(&repo_root));
     assert!(!found, "expected HTTP session for {repo_root} to be absent");
+}
+
+#[then(regex = r#"^the edge receives a start request with model "([^"]+)" and name "([^"]+)"$"#)]
+async fn then_edge_receives_start_request(world: &mut HubWorld, model: String, name: String) {
+    let capture = world.start_capture.as_ref().expect("start capture missing");
+    let payload = capture
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("no payload captured");
+    let got_model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("");
+    let got_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    assert_eq!(got_model, model);
+    assert_eq!(got_name, name);
 }
 
 #[tokio::main]

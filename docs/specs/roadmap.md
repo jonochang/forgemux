@@ -447,7 +447,7 @@ These are deliberately excluded. They may become relevant later but are not plan
 - **Task queuing and scheduling.** Forgemux does not decide when to start sessions. An external scheduler or CI system can call `fmux start`. The Foreman can spawn helper sessions but does not manage a task queue.
 - **Custom agent development.** Forgemux wraps existing agent CLIs. Building new agents is out of scope.
 - **CI/CD pipeline integration.** Not built in, but `fmux` with `--format json` is scriptable enough to be called from CI. A dedicated integration is not planned.
-- **Multi-tenancy.** Forgemux assumes a single organisation. Tenant isolation across organisations is not in scope.
+- **Multi-tenancy.** Forgemux assumes a single organisation. Tenant isolation across organisations is not in scope, but the hub supports org/workspace seeding from config for single-org setups.
 - **Mobile access.** The dashboard is responsive but not optimised for mobile. Terminal attach from mobile is not a target.
 
 ---

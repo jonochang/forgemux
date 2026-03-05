@@ -1,7 +1,7 @@
+use crate::{HubConfig, OrganizationSeed, WorkspaceSeed};
 use anyhow::Context;
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
-use crate::{HubConfig, OrganizationSeed, WorkspaceSeed};
 use forgemux_core::{
     AttentionBudget, Decision, DecisionAction, DecisionContext, DecisionResolution, ReplayEvent,
     ReplayEventType, SessionHubMeta, SessionState, Severity, Workspace, WorkspaceRepo,
@@ -70,10 +70,7 @@ async fn insert_workspace(
     default_org: &OrganizationSeed,
     workspace: &WorkspaceSeed,
 ) -> anyhow::Result<()> {
-    let org_id = workspace
-        .org_id
-        .as_ref()
-        .unwrap_or(&default_org.id);
+    let org_id = workspace.org_id.as_ref().unwrap_or(&default_org.id);
     sqlx::query(
         r#"
         INSERT OR IGNORE INTO workspaces
@@ -557,7 +554,9 @@ fn decision_from_row(row: DecisionRow) -> anyhow::Result<Decision> {
 async fn workspace_from_row(pool: &SqlitePool, row: WorkspaceRow) -> anyhow::Result<Workspace> {
     let repos: Vec<WorkspaceRepo> = serde_json::from_str(&row.repos_json)?;
     let members: Vec<String> = serde_json::from_str(&row.members_json)?;
-    let used = budget_used_today(pool, &row.id, &row.timezone).await.unwrap_or(0);
+    let used = budget_used_today(pool, &row.id, &row.timezone)
+        .await
+        .unwrap_or(0);
     Ok(Workspace {
         id: row.id,
         org_id: row.org_id,

@@ -86,13 +86,15 @@ export function AttachView({ sessions, initialSessionId }) {
 
   useEffect(() => {
     if (modelPreset === "custom") return;
-    if (!modelOptions.includes(model)) {
+    if (!modelOptions.includes(modelPreset)) {
       const fallback = modelOptions[0] || "custom";
       setModelPreset(fallback === "custom" ? "custom" : fallback);
       setModel(fallback === "custom" ? "" : fallback);
       return;
     }
-    setModelPreset(model);
+    if (model !== modelPreset) {
+      setModel(modelPreset);
+    }
   }, [agent, model, modelPreset, modelOptions]);
 
   const flushPending = useCallback(() => {

@@ -213,6 +213,7 @@ fn main() {
                     Some(notify)
                 },
                 policy,
+                goal: None,
             };
 
             let client = reqwest::blocking::Client::new();
