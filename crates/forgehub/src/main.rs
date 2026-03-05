@@ -1359,7 +1359,10 @@ async fn replay_latest(
     }
     match service.latest_replay_event(&id).await {
         Ok(Some(event)) => (axum::http::StatusCode::OK, Json(event)).into_response(),
-        Ok(None) => (axum::http::StatusCode::NOT_FOUND, Json(serde_json::json!({})))
+        Ok(None) => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({})),
+        )
             .into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
