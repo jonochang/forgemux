@@ -28,6 +28,7 @@ pub struct StartRequest {
     pub agent: String,
     pub model: String,
     pub repo: String,
+    pub name: Option<String>,
     pub worktree: bool,
     pub branch: Option<String>,
     pub worktree_path: Option<String>,
@@ -41,6 +42,7 @@ pub struct ImportRequest {
     pub agent: String,
     pub model: String,
     pub repo: Option<String>,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -266,6 +268,7 @@ async fn start_session<R: CommandRunner + 'static>(
         agent,
         req.model,
         req.repo,
+        req.name,
         worktree_spec,
         notify,
         req.policy,
@@ -316,7 +319,7 @@ async fn import_session<R: CommandRunner + 'static>(
         }
     };
     let repo = req.repo.map(PathBuf::from);
-    match service.import_tmux_session(&req.tmux_session, agent, req.model, repo) {
+    match service.import_tmux_session(&req.tmux_session, agent, req.model, repo, req.name) {
         Ok(record) => Ok(Json(StartResponse {
             session_id: record.id.as_str().to_string(),
         })),
@@ -1169,6 +1172,7 @@ mod tests {
         let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
         let runner = FakeRunner::default();
         runner.set_stdout_for(&["display-message", "#{pane_current_path}"], b"/tmp/repo\n");
+        runner.set_status_for(&["has-session", "old-session"], 0);
         let service = Arc::new(SessionService::new(config, runner));
         let app = build_router(service);
 

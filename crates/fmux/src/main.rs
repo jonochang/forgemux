@@ -51,6 +51,8 @@ enum Command {
         #[arg(long)]
         repo: Option<String>,
         #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
         notify: Vec<String>,
         #[arg(long)]
         policy: Option<String>,
@@ -62,7 +64,9 @@ enum Command {
         worktree_path: Option<String>,
     },
     Attach {
-        session_id: String,
+        #[arg(long, short = 'n')]
+        name: Option<String>,
+        session_id: Option<String>,
     },
     Detach {
         session_id: String,
@@ -81,6 +85,8 @@ enum Command {
         model: String,
         #[arg(long)]
         repo: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         no_attach: bool,
     },
@@ -160,6 +166,7 @@ fn main() {
             agent,
             model,
             repo,
+            name,
             notify,
             policy,
             worktree,
@@ -194,6 +201,7 @@ fn main() {
                 },
                 model,
                 repo: repo.unwrap_or_default(),
+                name,
                 worktree: worktree_spec.is_some(),
                 branch: worktree_spec.as_ref().map(|spec| spec.branch.clone()),
                 worktree_path: worktree_spec
@@ -235,7 +243,54 @@ fn main() {
                 }
             }
         }
-        Command::Attach { session_id } => {
+        Command::Attach { name, session_id } => {
+            if name.is_some() && session_id.is_some() {
+                eprintln!("attach supports either --name or session_id, not both");
+                std::process::exit(2);
+            }
+            let query = if let Some(prefix) = name {
+                prefix
+            } else if let Some(id) = session_id {
+                id
+            } else {
+                eprintln!("attach requires a session_id or --name");
+                std::process::exit(2);
+            };
+            if query.trim().is_empty() {
+                eprintln!("attach requires a non-empty query");
+                std::process::exit(2);
+            }
+            let session_id = {
+                let client = reqwest::blocking::Client::new();
+                let url = format!("{}/sessions", edge_addr.trim_end_matches('/'));
+                let req = apply_headers(client.get(url), token.as_deref());
+                let response = req.send();
+                match response {
+                    Ok(resp) if resp.status().is_success() => {
+                        let sessions: Vec<forgemux_core::SessionRecord> = resp.json().unwrap();
+                        match resolve_session_id_by_query(&sessions, &query) {
+                            Ok(id) => id,
+                            Err(err) => {
+                                eprintln!("attach failed: {err}");
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    Ok(resp) => {
+                        let body = resp.json::<forged::server::ErrorResponse>().unwrap_or(
+                            forged::server::ErrorResponse {
+                                error: "unknown error".to_string(),
+                            },
+                        );
+                        eprintln!("attach failed: {}", body.error);
+                        std::process::exit(1);
+                    }
+                    Err(err) => {
+                        eprintln!("attach failed: {err}");
+                        std::process::exit(1);
+                    }
+                }
+            };
             if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
                 eprintln!(
                     "attach requires a TTY. Try: `ssh -t <host>` or `tmux attach -t {}`",
@@ -311,6 +366,7 @@ fn main() {
             agent,
             model,
             repo,
+            name,
             no_attach,
         } => {
             let agent = match agent.as_str() {
@@ -329,6 +385,7 @@ fn main() {
                 },
                 model,
                 repo,
+                name,
             };
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/sessions/import", edge_addr.trim_end_matches('/'));
@@ -966,8 +1023,16 @@ fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {
         println!("no sessions");
         return;
     }
-    println!("ID\tAGENT\tMODEL\tSTATE");
+    println!(
+        "{:<20} {:<10} {:<8} {:<16} STATE",
+        "NAME", "ID", "AGENT", "MODEL"
+    );
     for session in sessions {
+        let name = truncate_name(&session_display_name(&session), 20);
+        let agent = match session.agent {
+            AgentType::Claude => "Claude",
+            AgentType::Codex => "Codex",
+        };
         let state = match session.state {
             SessionState::WaitingInput => "waiting",
             SessionState::Running => "running",
@@ -979,10 +1044,77 @@ fn print_sessions(sessions: Vec<forgemux_core::SessionRecord>) {
             SessionState::Starting => "starting",
         };
         println!(
-            "{}\t{:?}\t{}\t{}",
-            session.id, session.agent, session.model, state
+            "{:<20} {:<10} {:<8} {:<16} {}",
+            name, session.id, agent, session.model, state
         );
     }
+}
+
+fn session_display_name(session: &forgemux_core::SessionRecord) -> String {
+    if let Some(name) = session.name.as_ref().filter(|name| !name.trim().is_empty()) {
+        return name.trim().to_string();
+    }
+    session
+        .repo_root
+        .file_name()
+        .and_then(|part| part.to_str())
+        .filter(|part| !part.trim().is_empty())
+        .unwrap_or("session")
+        .to_string()
+}
+
+fn truncate_name(name: &str, max_len: usize) -> String {
+    name.chars().take(max_len).collect()
+}
+
+fn resolve_session_id_by_query(
+    sessions: &[forgemux_core::SessionRecord],
+    query: &str,
+) -> Result<String, String> {
+    let mut name_matches = Vec::new();
+    for session in sessions {
+        let name = session_display_name(session);
+        if name.starts_with(query) {
+            name_matches.push((session.id.as_str().to_string(), name));
+        }
+    }
+    if name_matches.len() == 1 {
+        return Ok(name_matches[0].0.clone());
+    }
+    if name_matches.len() > 1 {
+        let summary = name_matches
+            .iter()
+            .map(|(id, name)| format!("{} ({})", id, name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "multiple session names match \"{}\": {}",
+            query, summary
+        ));
+    }
+
+    let mut id_matches = Vec::new();
+    for session in sessions {
+        let id = session.id.as_str().to_string();
+        if id.starts_with(query) {
+            id_matches.push((id, session_display_name(session)));
+        }
+    }
+    if id_matches.len() == 1 {
+        return Ok(id_matches[0].0.clone());
+    }
+    if id_matches.len() > 1 {
+        let summary = id_matches
+            .iter()
+            .map(|(id, name)| format!("{} ({})", id, name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "multiple session IDs match \"{}\": {}",
+            query, summary
+        ));
+    }
+    Err(format!("no session name or ID starts with \"{}\"", query))
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1246,5 +1378,66 @@ mel-01 = "edge-mel-01.tailnet:9443"
         assert!(report.ok());
         assert_eq!(report.hub_ok, None);
         assert!(report.token_present);
+    }
+
+    fn make_session(id: &str, name: Option<&str>) -> forgemux_core::SessionRecord {
+        let mut session = forgemux_core::SessionRecord::new(
+            forgemux_core::AgentType::Codex,
+            "gpt-5.3-codex",
+            PathBuf::from("/tmp/repo"),
+        );
+        session.id = forgemux_core::SessionId::from(id);
+        session.name = name.map(|value| value.to_string());
+        session
+    }
+
+    #[test]
+    fn resolve_session_id_by_query_prefers_name_match() {
+        let sessions = vec![
+            make_session("S-11111111", Some("hl-main")),
+            make_session("S-aaaa2222", Some("other")),
+        ];
+        let id = resolve_session_id_by_query(&sessions, "hl").unwrap();
+        assert_eq!(id, "S-11111111");
+    }
+
+    #[test]
+    fn resolve_session_id_by_query_falls_back_to_id_prefix() {
+        let sessions = vec![
+            make_session("S-11111111", Some("alpha")),
+            make_session("S-2222bbbb", Some("beta")),
+        ];
+        let id = resolve_session_id_by_query(&sessions, "S-2222").unwrap();
+        assert_eq!(id, "S-2222bbbb");
+    }
+
+    #[test]
+    fn resolve_session_id_by_query_errors_on_multiple_name_matches() {
+        let sessions = vec![
+            make_session("S-11111111", Some("hl-main")),
+            make_session("S-22222222", Some("hl-worker")),
+        ];
+        let err = resolve_session_id_by_query(&sessions, "hl").unwrap_err();
+        assert!(err.contains("multiple session names match"));
+    }
+
+    #[test]
+    fn resolve_session_id_by_query_errors_on_multiple_id_matches() {
+        let sessions = vec![
+            make_session("S-abc11111", Some("alpha")),
+            make_session("S-abc22222", Some("beta")),
+        ];
+        let err = resolve_session_id_by_query(&sessions, "S-abc").unwrap_err();
+        assert!(err.contains("multiple session IDs match"));
+    }
+
+    #[test]
+    fn resolve_session_id_by_query_errors_when_no_match() {
+        let sessions = vec![
+            make_session("S-11111111", Some("alpha")),
+            make_session("S-22222222", Some("beta")),
+        ];
+        let err = resolve_session_id_by_query(&sessions, "zzz").unwrap_err();
+        assert!(err.contains("no session name or ID starts with"));
     }
 }

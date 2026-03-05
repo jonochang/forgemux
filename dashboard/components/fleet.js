@@ -71,6 +71,8 @@ export function FleetDashboard({
         const stateLabel = statusLabel(session.state);
         const repos = [repoFromPath(session.repo_root)];
         const contextPct = session.context_pct || 0;
+        const sessionName = session.name || repoFromPath(session.repo_root) || session.id;
+        const goalLabel = session.goal || "(no goal set)";
         return html`<${Card}
           style=${{ border: `1px solid ${riskColor(risk)}`, cursor: onSelectSession ? "pointer" : "default" }}
           onClick=${() => onSelectSession?.(session.id)}
@@ -79,8 +81,9 @@ export function FleetDashboard({
             <div style=${{ display: "flex", alignItems: "center", gap: "10px" }}>
               <${Dot} color=${riskColor(risk)} size=${10} pulse=${risk === "red"} />
               <div>
-                <div style=${{ fontWeight: 600, color: T.t1 }}>${session.goal || "(no goal set)"}</div>
+                <div style=${{ fontWeight: 600, color: T.t1 }}>${sessionName}</div>
                 <div style=${{ fontSize: "12px", color: T.t3 }}>${session.id} · ${session.model || "model"}</div>
+                <div style=${{ fontSize: "12px", color: T.t3 }}>${goalLabel}</div>
               </div>
             </div>
             <${Badge} color=${statusColor(stateLabel)} bg=${T.bg3}>${stateLabel}</${Badge}>
