@@ -220,6 +220,25 @@ pub async fn list_replay_events(
     rows.into_iter().map(replay_event_from_row).collect()
 }
 
+pub async fn latest_replay_event(
+    pool: &SqlitePool,
+    session_id: &str,
+) -> anyhow::Result<Option<ReplayEvent>> {
+    let row = sqlx::query_as::<_, ReplayEventRow>(
+        r#"
+        SELECT id, session_id, repo_id, timestamp, elapsed, event_type, action, result, payload
+        FROM replay_events
+        WHERE session_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(replay_event_from_row).transpose()
+}
+
 pub async fn ensure_workspace(pool: &SqlitePool, workspace_id: &str) -> anyhow::Result<()> {
     let org_id = "org-default";
     sqlx::query("INSERT OR IGNORE INTO organizations (id, name) VALUES (?, ?)")

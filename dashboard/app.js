@@ -1,5 +1,5 @@
 import { h, render } from "./lib/preact.module.js";
-import { useEffect, useMemo, useState } from "./lib/hooks.module.js";
+import { useEffect, useMemo, useRef, useState } from "./lib/hooks.module.js";
 import htm from "./lib/htm.module.js";
 import { TopNav } from "./components/nav.js";
 import { FleetDashboard } from "./components/fleet.js";
@@ -11,6 +11,21 @@ import { api } from "./services/api.js";
 import { connectWS } from "./services/ws.js";
 
 const html = htm.bind(h);
+
+function repoFromPath(path) {
+  if (!path) return "";
+  const parts = path.split("/").filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function sessionLabel(session) {
+  return session?.name || repoFromPath(session?.repo_root) || session?.goal || session?.id || "session";
+}
+
+function isWaitingState(state) {
+  const value = (state || "").toLowerCase();
+  return value === "waitinginput" || value === "waiting_input" || value === "waiting";
+}
 
 function useHashRoute(defaultView = "fleet") {
   const [view, setView] = useState(() => window.location.hash.replace("#", "") || defaultView);
@@ -62,6 +77,19 @@ function App() {
   const [workspaces, setWorkspaces] = useState([]);
   const [workspaceId, setWorkspaceId] = useState(baseWorkspace.id);
   const [workspace, setWorkspace] = useState(baseWorkspace);
+  const lastStatesRef = useRef(new Map());
+  const notifiedRef = useRef(new Set());
+
+  const openAttachForSession = (sessionId) => {
+    if (!sessionId) return;
+    try {
+      localStorage.setItem("forgemux_attach_session", sessionId);
+    } catch {
+      // ignore
+    }
+    setAttachSessionId(sessionId);
+    setView("attach");
+  };
 
   useEffect(() => {
     api
@@ -88,6 +116,88 @@ function App() {
     });
     return () => stop();
   }, [workspaceId]);
+
+  useEffect(() => {
+    const key = "forgemux_attach_session";
+    const readPending = () => {
+      try {
+        return localStorage.getItem(key);
+      } catch {
+        return null;
+      }
+    };
+    const pending = readPending();
+    if (pending) {
+      openAttachForSession(pending);
+      try {
+        localStorage.removeItem(key);
+      } catch {
+        // ignore
+      }
+    }
+    const onStorage = (event) => {
+      if (event.key !== key) return;
+      if (event.newValue) {
+        openAttachForSession(event.newValue);
+        try {
+          localStorage.removeItem(key);
+        } catch {
+          // ignore
+        }
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  useEffect(() => {
+    const notifyWaiting = async (session) => {
+      if (typeof Notification === "undefined") return;
+      let permission = Notification.permission;
+      if (permission === "default") {
+        try {
+          permission = await Notification.requestPermission();
+        } catch {
+          return;
+        }
+      }
+      if (permission !== "granted") return;
+
+      let detail = session.goal || "";
+      try {
+        const event = await api.replayLatest(session.id);
+        if (event?.action) {
+          detail = event.result ? `${event.action} — ${event.result}` : event.action;
+        }
+      } catch {
+        // ignore
+      }
+
+      const title = `Waiting for input: ${sessionLabel(session)}`;
+      const body = detail || `${session.agent || "agent"} · ${session.model || "model"}`;
+      const notification = new Notification(title, { body });
+      notification.onclick = () => {
+        try {
+          window.focus();
+        } catch {
+          // ignore
+        }
+        openAttachForSession(session.id);
+      };
+    };
+
+    sessions.forEach((session) => {
+      const prev = lastStatesRef.current.get(session.id);
+      const next = session.state;
+      lastStatesRef.current.set(session.id, next);
+      if (!isWaitingState(next)) return;
+      const key = `${session.id}:${next}`;
+      if (notifiedRef.current.has(key)) return;
+      if (prev && prev === next) return;
+      notifiedRef.current.add(key);
+      notifyWaiting(session);
+    });
+  }, [sessions]);
 
   useEffect(() => {
     api
@@ -254,8 +364,7 @@ function App() {
   };
 
   const attachSession = (id) => {
-    setAttachSessionId(id);
-    setView("attach");
+    openAttachForSession(id);
   };
 
   const orgLabel = workspace.org || workspace.org_id || baseWorkspace.org;
