@@ -75,7 +75,11 @@ impl CommandRunner for FakeRunner {
             1
         } else {
             let overrides = self.overrides.lock().unwrap();
-            let mut code = 0;
+            let mut code = if args.iter().any(|arg| arg == "has-session") {
+                1
+            } else {
+                0
+            };
             for (pattern, status_code) in overrides.iter() {
                 if pattern
                     .iter()
@@ -570,10 +574,9 @@ impl<R: CommandRunner> SessionService<R> {
         let mut reaped = 0;
         for line in String::from_utf8_lossy(&output.stdout).lines() {
             let name = line.trim();
-            if !name.starts_with("S-") {
+            let Some(id) = self.tmux_session_id(name) else {
                 continue;
-            }
-            let id = forgemux_core::SessionId::from(name);
+            };
             if known.contains(&id) {
                 continue;
             }
@@ -594,14 +597,16 @@ impl<R: CommandRunner> SessionService<R> {
         model: impl Into<String>,
         repo_path: impl AsRef<Path>,
     ) -> anyhow::Result<SessionRecord> {
-        self.start_session_with_worktree(agent, model, repo_path, None, None, None)
+        self.start_session_with_worktree(agent, model, repo_path, None, None, None, None)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start_session_with_worktree(
         &self,
         agent: AgentType,
         model: impl Into<String>,
         repo_path: impl AsRef<Path>,
+        name: Option<String>,
         worktree: Option<WorktreeSpec>,
         notify: Option<Vec<NotificationKind>>,
         policy: Option<String>,
@@ -639,6 +644,12 @@ impl<R: CommandRunner> SessionService<R> {
             .manager
             .create_session(agent.clone(), model, &session_root)
             .context("create session record")?;
+        let normalized_name = normalize_session_name(name, &session_root);
+        record.name = Some(normalized_name.clone());
+        let base_tmux_name =
+            normalize_tmux_session_name(&truncate_session_name(&normalized_name, 20));
+        let tmux_name = self.allocate_tmux_session_name(&base_tmux_name);
+        record.tmux_session = Some(tmux_name.clone());
         if let Some(policy_name) = policy.clone() {
             if !self.config.policies.contains_key(&policy_name) {
                 anyhow::bail!("unknown policy: {}", policy_name);
@@ -664,7 +675,9 @@ impl<R: CommandRunner> SessionService<R> {
             "new-session".to_string(),
             "-d".to_string(),
             "-s".to_string(),
-            record.id.as_str().to_string(),
+            tmux_name.clone(),
+            "-n".to_string(),
+            agent_tmux_name(&agent).to_string(),
             "-c".to_string(),
             session_root.to_string_lossy().to_string(),
             "--".to_string(),
@@ -682,11 +695,11 @@ impl<R: CommandRunner> SessionService<R> {
         }
 
         self.ensure_transcript_pipe(&record)?;
-        self.set_tmux_env(&record.id, "SESSION_ID", record.id.as_str())?;
+        self.set_tmux_env(self.tmux_target(&record), "SESSION_ID", record.id.as_str())?;
         if let Some(addr) = self.config.advertise_addr.clone() {
-            self.set_tmux_env(&record.id, "FORGED_ADDR", &addr)?;
+            self.set_tmux_env(self.tmux_target(&record), "FORGED_ADDR", &addr)?;
             if let Some(port) = addr.rsplit(':').next() {
-                self.set_tmux_env(&record.id, "FORGED_PORT", port)?;
+                self.set_tmux_env(self.tmux_target(&record), "FORGED_PORT", port)?;
             }
         }
 
@@ -726,6 +739,12 @@ impl<R: CommandRunner> SessionService<R> {
             .manager
             .create_session_with_role(agent.clone(), model, repo_path, role)
             .context("create foreman session")?;
+        let normalized_name = normalize_session_name(None, &record.repo_root);
+        record.name = Some(normalized_name.clone());
+        let base_tmux_name =
+            normalize_tmux_session_name(&truncate_session_name(&normalized_name, 20));
+        let tmux_name = self.allocate_tmux_session_name(&base_tmux_name);
+        record.tmux_session = Some(tmux_name.clone());
         let expected = record.version;
         record.touch_state(SessionState::Starting);
         self.store.save_checked(&record, expected)?;
@@ -745,7 +764,9 @@ impl<R: CommandRunner> SessionService<R> {
             "new-session".to_string(),
             "-d".to_string(),
             "-s".to_string(),
-            record.id.as_str().to_string(),
+            tmux_name.clone(),
+            "-n".to_string(),
+            agent_tmux_name(&agent).to_string(),
             "--".to_string(),
             agent_cfg.command.clone(),
         ];
@@ -761,11 +782,11 @@ impl<R: CommandRunner> SessionService<R> {
         }
 
         self.ensure_transcript_pipe(&record)?;
-        self.set_tmux_env(&record.id, "SESSION_ID", record.id.as_str())?;
+        self.set_tmux_env(self.tmux_target(&record), "SESSION_ID", record.id.as_str())?;
         if let Some(addr) = self.config.advertise_addr.clone() {
-            self.set_tmux_env(&record.id, "FORGED_ADDR", &addr)?;
+            self.set_tmux_env(self.tmux_target(&record), "FORGED_ADDR", &addr)?;
             if let Some(port) = addr.rsplit(':').next() {
-                self.set_tmux_env(&record.id, "FORGED_PORT", port)?;
+                self.set_tmux_env(self.tmux_target(&record), "FORGED_PORT", port)?;
             }
         }
         let expected = record.version;
@@ -800,7 +821,7 @@ impl<R: CommandRunner> SessionService<R> {
                 .unwrap_or(session.last_activity_at);
             let waiting_hint = self.waiting_hint(&session, last_output_at);
             let signal = StateSignal {
-                process_alive: self.has_session(&session.id),
+                process_alive: self.has_session(&session),
                 exit_code: None,
                 last_output_at,
                 recent_output: output,
@@ -829,12 +850,13 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn stop_session(&self, id: &str) -> anyhow::Result<()> {
         let id = forgemux_core::SessionId::from(id);
-        self.send_graceful_shutdown(&id)?;
-        self.wait_for_session_exit(&id);
-        if self.has_session(&id) {
-            self.kill_tmux_session(&id)?;
-        }
         let mut record = self.store.load(&id)?;
+        let tmux_target = self.tmux_target(&record).to_string();
+        self.send_graceful_shutdown(&tmux_target)?;
+        self.wait_for_session_exit(&record);
+        if self.tmux_has_session(&tmux_target) {
+            self.kill_tmux_session(&tmux_target)?;
+        }
         let from_state = record.state.clone();
         let expected = record.version;
         record.touch_state(SessionState::Terminated);
@@ -849,6 +871,7 @@ impl<R: CommandRunner> SessionService<R> {
         agent: AgentType,
         model: impl Into<String>,
         repo_override: Option<PathBuf>,
+        name: Option<String>,
     ) -> anyhow::Result<SessionRecord> {
         if !self.tmux_has_session(tmux_name) {
             anyhow::bail!("tmux session not found: {}", tmux_name);
@@ -864,14 +887,28 @@ impl<R: CommandRunner> SessionService<R> {
             }
         };
         let mut record = SessionRecord::new(agent, model, repo_root);
-        let new_id = record.id.as_str().to_string();
-        self.rename_tmux_session(tmux_name, &new_id)?;
+        let window_name = agent_tmux_name(&record.agent).to_string();
+        let normalized_name = normalize_session_name(name, &record.repo_root);
+        record.name = Some(normalized_name.clone());
+        let base_tmux_name =
+            normalize_tmux_session_name(&truncate_session_name(&normalized_name, 20));
+        let source_tmux = tmux_name;
+        let new_tmux = if source_tmux == base_tmux_name.as_str() {
+            base_tmux_name
+        } else {
+            self.allocate_tmux_session_name(&base_tmux_name)
+        };
+        record.tmux_session = Some(new_tmux.clone());
+        if source_tmux != new_tmux.as_str() {
+            self.rename_tmux_session(source_tmux, &new_tmux)?;
+        }
+        self.rename_tmux_window(&new_tmux, 0, &window_name)?;
         self.ensure_transcript_pipe(&record)?;
-        self.set_tmux_env(&record.id, "SESSION_ID", record.id.as_str())?;
+        self.set_tmux_env(self.tmux_target(&record), "SESSION_ID", record.id.as_str())?;
         if let Some(addr) = self.config.advertise_addr.clone() {
-            self.set_tmux_env(&record.id, "FORGED_ADDR", &addr)?;
+            self.set_tmux_env(self.tmux_target(&record), "FORGED_ADDR", &addr)?;
             if let Some(port) = addr.rsplit(':').next() {
-                self.set_tmux_env(&record.id, "FORGED_PORT", port)?;
+                self.set_tmux_env(self.tmux_target(&record), "FORGED_PORT", port)?;
             }
         }
         let expected = record.version;
@@ -955,11 +992,13 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn detach_session(&self, id: &str) -> anyhow::Result<()> {
         let id = forgemux_core::SessionId::from(id);
+        let record = self.store.load(&id)?;
+        let tmux_target = self.tmux_target(&record);
         let args = vec![
             "detach-client".to_string(),
             "-a".to_string(),
             "-s".to_string(),
-            id.as_str().to_string(),
+            tmux_target.to_string(),
         ];
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
@@ -973,8 +1012,9 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn kill_session(&self, id: &str) -> anyhow::Result<()> {
         let id = forgemux_core::SessionId::from(id);
-        self.kill_tmux_session(&id)?;
         let mut record = self.store.load(&id)?;
+        let tmux_target = self.tmux_target(&record).to_string();
+        self.kill_tmux_session(&tmux_target)?;
         let from_state = record.state.clone();
         let expected = record.version;
         record.touch_state(SessionState::Terminated);
@@ -983,11 +1023,11 @@ impl<R: CommandRunner> SessionService<R> {
         Ok(())
     }
 
-    fn kill_tmux_session(&self, id: &forgemux_core::SessionId) -> anyhow::Result<()> {
+    fn kill_tmux_session(&self, target: &str) -> anyhow::Result<()> {
         let args = vec![
             "kill-session".to_string(),
             "-t".to_string(),
-            id.as_str().to_string(),
+            target.to_string(),
         ];
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
@@ -1010,6 +1050,23 @@ impl<R: CommandRunner> SessionService<R> {
         if !output.status.success() {
             anyhow::bail!(
                 "tmux rename-session failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    fn rename_tmux_window(&self, session: &str, index: u32, name: &str) -> anyhow::Result<()> {
+        let args = vec![
+            "rename-window".to_string(),
+            "-t".to_string(),
+            format!("{session}:{index}"),
+            name.to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &args)?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux rename-window failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -1046,11 +1103,56 @@ impl<R: CommandRunner> SessionService<R> {
             .unwrap_or(false)
     }
 
-    fn send_graceful_shutdown(&self, id: &forgemux_core::SessionId) -> anyhow::Result<()> {
+    fn tmux_session_id(&self, target: &str) -> Option<forgemux_core::SessionId> {
+        let args = vec![
+            "show-environment".to_string(),
+            "-t".to_string(),
+            target.to_string(),
+            "SESSION_ID".to_string(),
+        ];
+        let output = self.runner.run(&self.config.tmux_bin, &args).ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let value = raw
+            .lines()
+            .find_map(|line| line.strip_prefix("SESSION_ID="))
+            .map(str::trim)?;
+        if value.is_empty() {
+            return None;
+        }
+        Some(forgemux_core::SessionId::from(value))
+    }
+
+    fn allocate_tmux_session_name(&self, base: &str) -> String {
+        if !self.tmux_has_session(base) {
+            return base.to_string();
+        }
+        // Bound retries so faulty tmux responses (or test doubles) cannot spin forever.
+        let mut idx: u32 = 2;
+        while idx <= 50 {
+            let candidate = format!("{base}-{idx}");
+            if !self.tmux_has_session(&candidate) {
+                return candidate;
+            }
+            idx = idx.saturating_add(1);
+        }
+        format!("{base}-{}", Utc::now().timestamp_millis())
+    }
+
+    fn tmux_target<'a>(&self, session: &'a SessionRecord) -> &'a str {
+        session
+            .tmux_session
+            .as_deref()
+            .unwrap_or_else(|| session.id.as_str())
+    }
+
+    fn send_graceful_shutdown(&self, target: &str) -> anyhow::Result<()> {
         let interrupt = vec![
             "send-keys".to_string(),
             "-t".to_string(),
-            id.as_str().to_string(),
+            target.to_string(),
             "C-c".to_string(),
         ];
         let output = self.runner.run(&self.config.tmux_bin, &interrupt)?;
@@ -1063,7 +1165,7 @@ impl<R: CommandRunner> SessionService<R> {
         let exit_cmd = vec![
             "send-keys".to_string(),
             "-t".to_string(),
-            id.as_str().to_string(),
+            target.to_string(),
             "-l".to_string(),
             "exit".to_string(),
         ];
@@ -1077,7 +1179,7 @@ impl<R: CommandRunner> SessionService<R> {
         let enter = vec![
             "send-keys".to_string(),
             "-t".to_string(),
-            id.as_str().to_string(),
+            target.to_string(),
             "Enter".to_string(),
         ];
         let output = self.runner.run(&self.config.tmux_bin, &enter)?;
@@ -1090,7 +1192,7 @@ impl<R: CommandRunner> SessionService<R> {
         Ok(())
     }
 
-    fn wait_for_session_exit(&self, id: &forgemux_core::SessionId) {
+    fn wait_for_session_exit(&self, session: &SessionRecord) {
         if self.config.graceful_shutdown_ms == 0 {
             return;
         }
@@ -1098,7 +1200,7 @@ impl<R: CommandRunner> SessionService<R> {
         let poll = std::time::Duration::from_millis(self.config.graceful_shutdown_poll_ms.max(1));
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            if !self.has_session(id) {
+            if !self.has_session(session) {
                 return;
             }
             std::thread::sleep(poll);
@@ -1107,10 +1209,12 @@ impl<R: CommandRunner> SessionService<R> {
 
     pub fn attach_session(&self, id: &str) -> anyhow::Result<()> {
         let id = forgemux_core::SessionId::from(id);
+        let record = self.store.load(&id)?;
+        let tmux_target = self.tmux_target(&record);
         let status = Command::new(&self.config.tmux_bin)
             .arg("attach-session")
             .arg("-t")
-            .arg(id.as_str())
+            .arg(tmux_target)
             .status()?;
         if !status.success() {
             anyhow::bail!("tmux attach failed");
@@ -1268,13 +1372,19 @@ impl<R: CommandRunner> SessionService<R> {
         id: &forgemux_core::SessionId,
         lines: i32,
     ) -> anyhow::Result<String> {
+        let tmux_target = self
+            .store
+            .load(id)
+            .ok()
+            .and_then(|record| record.tmux_session)
+            .unwrap_or_else(|| id.as_str().to_string());
         let args = vec![
             "capture-pane".to_string(),
             "-p".to_string(),
             "-S".to_string(),
             format!("-{}", lines),
             "-t".to_string(),
-            id.as_str().to_string(),
+            tmux_target,
         ];
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
         if !output.status.success() {
@@ -1284,6 +1394,12 @@ impl<R: CommandRunner> SessionService<R> {
     }
 
     pub fn send_keys(&self, id: &forgemux_core::SessionId, input: &str) -> anyhow::Result<()> {
+        let tmux_target = self
+            .store
+            .load(id)
+            .ok()
+            .and_then(|record| record.tmux_session)
+            .unwrap_or_else(|| id.as_str().to_string());
         let cleaned = input.replace('\r', "");
         let needs_enter = cleaned.ends_with('\n');
         let literal = cleaned.trim_end_matches('\n');
@@ -1292,7 +1408,7 @@ impl<R: CommandRunner> SessionService<R> {
             let args = vec![
                 "send-keys".to_string(),
                 "-t".to_string(),
-                id.as_str().to_string(),
+                tmux_target.clone(),
                 "-l".to_string(),
                 literal.to_string(),
             ];
@@ -1309,7 +1425,7 @@ impl<R: CommandRunner> SessionService<R> {
             let args = vec![
                 "send-keys".to_string(),
                 "-t".to_string(),
-                id.as_str().to_string(),
+                tmux_target,
                 "Enter".to_string(),
             ];
             let output = self.runner.run(&self.config.tmux_bin, &args)?;
@@ -1332,16 +1448,11 @@ impl<R: CommandRunner> SessionService<R> {
         Ok(())
     }
 
-    fn set_tmux_env(
-        &self,
-        id: &forgemux_core::SessionId,
-        key: &str,
-        value: &str,
-    ) -> anyhow::Result<()> {
+    fn set_tmux_env(&self, target: &str, key: &str, value: &str) -> anyhow::Result<()> {
         let args = vec![
             "set-environment".to_string(),
             "-t".to_string(),
-            id.as_str().to_string(),
+            target.to_string(),
             key.to_string(),
             value.to_string(),
         ];
@@ -1355,16 +1466,8 @@ impl<R: CommandRunner> SessionService<R> {
         Ok(())
     }
 
-    fn has_session(&self, id: &forgemux_core::SessionId) -> bool {
-        let args = vec![
-            "has-session".to_string(),
-            "-t".to_string(),
-            id.as_str().to_string(),
-        ];
-        self.runner
-            .run(&self.config.tmux_bin, &args)
-            .map(|out| out.status.success())
-            .unwrap_or(false)
+    fn has_session(&self, session: &SessionRecord) -> bool {
+        self.tmux_has_session(self.tmux_target(session))
     }
 
     fn ensure_transcript_pipe(&self, record: &SessionRecord) -> anyhow::Result<()> {
@@ -1380,7 +1483,7 @@ impl<R: CommandRunner> SessionService<R> {
             "pipe-pane".to_string(),
             "-o".to_string(),
             "-t".to_string(),
-            record.id.as_str().to_string(),
+            self.tmux_target(record).to_string(),
             cmd,
         ];
         let output = self.runner.run(&self.config.tmux_bin, &args)?;
@@ -1891,6 +1994,41 @@ fn render_template(template: &str, session: &SessionRecord, event: NotificationE
         .replace("{{agent}}", &format!("{:?}", session.agent))
 }
 
+fn normalize_session_name(name: Option<String>, session_root: &Path) -> String {
+    if let Some(value) = name {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    let fallback = session_root
+        .file_name()
+        .and_then(|part| part.to_str())
+        .filter(|part| !part.trim().is_empty())
+        .unwrap_or("session");
+    fallback.to_string()
+}
+
+fn truncate_session_name(name: &str, max_len: usize) -> String {
+    name.chars().take(max_len).collect()
+}
+
+fn normalize_tmux_session_name(name: &str) -> String {
+    let mut out = name.replace(':', "-");
+    out = out.trim().to_string();
+    if out.is_empty() {
+        return "session".to_string();
+    }
+    out
+}
+
+fn agent_tmux_name(agent: &AgentType) -> &'static str {
+    match agent {
+        AgentType::Claude => "claude",
+        AgentType::Codex => "codex",
+    }
+}
+
 #[derive(serde::Serialize)]
 struct NotificationDelivery {
     ts: DateTime<Utc>,
@@ -2028,10 +2166,54 @@ mod tests {
             .unwrap();
 
         let calls = runner.calls();
+        let tmux_name = record.tmux_session.as_ref().expect("tmux session");
         assert!(calls.iter().any(|call| {
             call.contains(&"new-session".to_string())
-                && call.contains(&record.id.as_str().to_string())
+                && call.contains(&tmux_name.to_string())
+                && call.contains(&"-n".to_string())
+                && call.contains(&"claude".to_string())
         }));
+    }
+
+    #[test]
+    fn start_session_sets_default_name_from_repo_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("bin-baz");
+        std::fs::create_dir_all(&repo).unwrap();
+        let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner.clone());
+
+        let record = service
+            .start_session(AgentType::Claude, "sonnet", &repo)
+            .unwrap();
+
+        assert_eq!(record.name.as_deref(), Some("bin-baz"));
+    }
+
+    #[test]
+    fn start_session_uses_suffix_when_tmux_name_taken() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
+        config.tmux_bin = "tmux".to_string();
+        let runner = FakeRunner::default();
+        let service = SessionService::new(config, runner.clone());
+
+        let basename = tmp
+            .path()
+            .file_name()
+            .and_then(|part| part.to_str())
+            .unwrap_or("session");
+        let base = normalize_tmux_session_name(&truncate_session_name(basename, 20));
+        runner.set_status_for(&["has-session", &base], 0);
+        runner.set_status_for(&["has-session", &format!("{base}-2")], 1);
+
+        let record = service
+            .start_session(AgentType::Claude, "sonnet", tmp.path())
+            .unwrap();
+
+        let expected = format!("{base}-2");
+        assert_eq!(record.tmux_session.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
@@ -2048,9 +2230,10 @@ mod tests {
             .unwrap();
 
         let calls = runner.calls();
+        let tmux_name = record.tmux_session.as_ref().expect("tmux session");
         assert!(calls.iter().any(|call| {
             call.contains(&"set-environment".to_string())
-                && call.contains(&record.id.as_str().to_string())
+                && call.contains(&tmux_name.to_string())
                 && call.contains(&"SESSION_ID".to_string())
         }));
         assert!(calls.iter().any(|call| {
@@ -2066,7 +2249,7 @@ mod tests {
         let mut config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
         config.tmux_bin = "tmux".to_string();
         let runner = FakeRunner::default();
-        let service = SessionService::new(config, runner);
+        let service = SessionService::new(config, runner.clone());
 
         let record = service
             .start_session(AgentType::Claude, "sonnet", tmp.path())
@@ -2149,15 +2332,18 @@ mod tests {
         let config = ForgedConfig::default_with_data_dir(tmp.path().to_path_buf());
         let runner = FakeRunner::default();
         runner.set_stdout_for(&["display-message", "#{pane_current_path}"], b"/tmp/repo\n");
+        runner.set_status_for(&["has-session", "old-session"], 0);
         let service = SessionService::new(config, runner.clone());
 
         let record = service
-            .import_tmux_session("old-session", AgentType::Claude, "sonnet", None)
+            .import_tmux_session("old-session", AgentType::Claude, "sonnet", None, None)
             .unwrap();
 
         assert!(record.id.as_str().starts_with("S-"));
         assert_eq!(record.state, SessionState::Running);
         assert_eq!(record.repo_root, PathBuf::from("/tmp/repo"));
+        assert_eq!(record.name.as_deref(), Some("repo"));
+        assert_eq!(record.tmux_session.as_deref(), Some("repo"));
         let calls = runner.calls();
         assert!(
             calls
@@ -2169,6 +2355,12 @@ mod tests {
                 .iter()
                 .any(|call| call.contains(&"old-session".to_string()))
         );
+        assert!(calls.iter().any(|call| call.contains(&"repo".to_string())));
+        assert!(calls.iter().any(|call| {
+            call.contains(&"rename-window".to_string())
+                && call.contains(&"repo:0".to_string())
+                && call.contains(&"claude".to_string())
+        }));
     }
 
     #[test]
@@ -2180,17 +2372,16 @@ mod tests {
 
         let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
         record.id = forgemux_core::SessionId::from("S-KILL1");
+        record.tmux_session = Some("repo".to_string());
         record.touch_state(SessionState::Running);
         service.store.save(&record).unwrap();
 
         service.kill_session(record.id.as_str()).unwrap();
 
         let calls = runner.calls();
-        assert!(
-            calls
-                .iter()
-                .any(|call| call.contains(&"kill-session".to_string()))
-        );
+        assert!(calls.iter().any(|call| {
+            call.contains(&"kill-session".to_string()) && call.contains(&"repo".to_string())
+        }));
     }
 
     #[test]
@@ -2418,7 +2609,7 @@ mod tests {
             agent.usage_paths = vec![logs_root.to_string_lossy().to_string()];
         }
         let runner = FakeRunner::default();
-        let service = SessionService::new(config, runner);
+        let service = SessionService::new(config, runner.clone());
 
         let mut record = service
             .manager
@@ -2426,6 +2617,7 @@ mod tests {
             .unwrap();
         record.touch_state(SessionState::Running);
         service.store.save(&record).unwrap();
+        runner.set_status_for(&["has-session", record.id.as_str()], 0);
 
         let sessions = service.refresh_states().unwrap();
         let updated = sessions.iter().find(|s| s.id == record.id).unwrap();
@@ -2504,6 +2696,10 @@ mod tests {
         let service = SessionService::new(config, runner.clone());
 
         let id = forgemux_core::SessionId::from("S-TEST");
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
+        record.id = id.clone();
+        record.touch_state(SessionState::Running);
+        service.store.save(&record).unwrap();
         service.send_keys(&id, "echo hi\n").unwrap();
 
         let calls = runner.calls();
@@ -2522,6 +2718,10 @@ mod tests {
         let service = SessionService::new(config, runner);
 
         let id = forgemux_core::SessionId::from("S-INPUT1");
+        let mut record = SessionRecord::new(AgentType::Claude, "sonnet", tmp.path().to_path_buf());
+        record.id = id.clone();
+        record.touch_state(SessionState::Running);
+        service.store.save(&record).unwrap();
         service.send_keys(&id, "ls\n").unwrap();
 
         let path = tmp
@@ -2545,6 +2745,7 @@ mod tests {
                 AgentType::Claude,
                 "sonnet",
                 tmp.path(),
+                None,
                 None,
                 Some(vec![NotificationKind::Desktop]),
                 None,
@@ -2586,6 +2787,7 @@ mod tests {
             tmp.path(),
             None,
             None,
+            None,
             Some("restricted".to_string()),
         );
         assert!(result.is_err());
@@ -2603,7 +2805,7 @@ mod tests {
         let service = SessionService::new(config, runner);
 
         let record = service
-            .start_session_with_worktree(AgentType::Claude, "sonnet", "", None, None, None)
+            .start_session_with_worktree(AgentType::Claude, "sonnet", "", None, None, None, None)
             .unwrap();
         assert_eq!(record.repo_root, repo);
     }
@@ -2668,6 +2870,14 @@ mod tests {
         runner.set_stdout_for(
             &["list-sessions", "-F", "#{session_name}"],
             b"S-keep\nS-orphan\nnot-forgemux\n",
+        );
+        runner.set_stdout_for(
+            &["show-environment", "-t", "S-keep", "SESSION_ID"],
+            b"SESSION_ID=S-keep\n",
+        );
+        runner.set_stdout_for(
+            &["show-environment", "-t", "S-orphan", "SESSION_ID"],
+            b"SESSION_ID=S-orphan\n",
         );
         let service = SessionService::new(config, runner.clone());
 

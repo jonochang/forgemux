@@ -121,6 +121,10 @@ pub struct SessionRecord {
     pub agent: AgentType,
     pub model: String,
     pub repo_root: PathBuf,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub tmux_session: Option<String>,
     pub state: SessionState,
     pub role: SessionRole,
     pub policy: Option<String>,
@@ -141,6 +145,8 @@ impl SessionRecord {
             agent,
             model: model.into(),
             repo_root,
+            name: None,
+            tmux_session: None,
             state: SessionState::Provisioning,
             role: SessionRole::Worker,
             policy: None,

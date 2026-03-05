@@ -202,6 +202,7 @@ struct ForgedConfigOutput {
     advertise_addr: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_configure(
     cli: &Cli,
     non_interactive: bool,
@@ -252,11 +253,7 @@ fn run_configure(
             None
         } else {
             let input = prompt_string("Hub token (optional)", None)?;
-            if input.is_empty() {
-                None
-            } else {
-                Some(input)
-            }
+            if input.is_empty() { None } else { Some(input) }
         }
     } else {
         None
@@ -268,11 +265,7 @@ fn run_configure(
         Some("edge-01".to_string())
     } else {
         let input = prompt_string("Node ID", Some("edge-01"))?;
-        if input.is_empty() {
-            None
-        } else {
-            Some(input)
-        }
+        if input.is_empty() { None } else { Some(input) }
     };
 
     let advertise_addr_value = if wants_hub {

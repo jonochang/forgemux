@@ -5,6 +5,16 @@ import { ansiToHtml } from "../lib/ansi.js";
 import { updateLastSeen } from "../lib/stream.js";
 import { api } from "../services/api.js";
 
+function repoFromPath(path) {
+  if (!path) return "";
+  const parts = path.split("/").filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
+function sessionDisplayName(session) {
+  return session?.name || repoFromPath(session?.repo_root) || session?.goal || session?.id || "session";
+}
+
 export function AttachView({ sessions, initialSessionId }) {
   const [selectedId, setSelectedId] = useState(initialSessionId || null);
   const [attachStatus, setAttachStatus] = useState("disconnected");
@@ -14,6 +24,7 @@ export function AttachView({ sessions, initialSessionId }) {
   const [agent, setAgent] = useState("claude");
   const [model, setModel] = useState("sonnet");
   const [repo, setRepo] = useState("");
+  const [name, setName] = useState("");
   const [worktree, setWorktree] = useState(true);
   const [branch, setBranch] = useState("main");
   const [creating, setCreating] = useState(false);
@@ -192,6 +203,7 @@ export function AttachView({ sessions, initialSessionId }) {
         agent,
         model,
         repo: repo.trim(),
+        name: name.trim() || null,
         worktree,
         branch: worktree && branch.trim() ? branch.trim() : null,
       };
@@ -207,7 +219,7 @@ export function AttachView({ sessions, initialSessionId }) {
     } finally {
       setCreating(false);
     }
-  }, [edgeId, agent, model, repo, worktree, branch, selectSession]);
+  }, [edgeId, agent, model, repo, name, worktree, branch, selectSession]);
 
   const killSession = useCallback(
     async (id, label) => {
@@ -320,6 +332,19 @@ export function AttachView({ sessions, initialSessionId }) {
               fontSize: "12px",
             }}
           />
+          <input
+            value=${name}
+            onInput=${(e) => setName(e.target.value)}
+            placeholder="Session name (optional)"
+            style=${{
+              background: T.bg2,
+              border: `1px solid ${T.border}`,
+              color: T.t1,
+              padding: "6px 8px",
+              borderRadius: "6px",
+              fontSize: "12px",
+            }}
+          />
           <label style=${{ display: "flex", gap: "6px", alignItems: "center", fontSize: "11px", color: T.t2 }}>
             <input type="checkbox" checked=${worktree} onChange=${(e) => setWorktree(e.target.checked)} />
             Create worktree
@@ -392,12 +417,12 @@ export function AttachView({ sessions, initialSessionId }) {
                   whiteSpace: "nowrap",
                   flex: 1,
                 }}
-              >${s.goal || s.id}</span>
+              >${sessionDisplayName(s)}</span>
               <button
                 onClick=${(e) => {
                   e.preventDefault();
                   e.stopPropagation();
-                  killSession(s.id, s.goal || s.id);
+                  killSession(s.id, sessionDisplayName(s));
                 }}
                 disabled=${killingId === s.id}
                 style=${{
@@ -415,6 +440,7 @@ export function AttachView({ sessions, initialSessionId }) {
               </button>
             </div>
             <div style=${{ display: "flex", alignItems: "center", gap: "6px", paddingLeft: "15px" }}>
+              <span style=${{ fontSize: "10px", color: T.t3, fontFamily: T.mono }}>${s.id}</span>
               ${s.model &&
               html`<span style=${{ fontSize: "10px", color: T.t3 }}>${s.model}</span>`}
               <${Badge} color=${statusColor(s.state)} bg=${T.bg4}>${s.state || "unknown"}</${Badge}>

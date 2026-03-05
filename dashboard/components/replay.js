@@ -2,6 +2,12 @@ import { useMemo } from "../lib/hooks.module.js";
 import { html, Badge, Dot, RepoPill, SectionLabel } from "./shared.js";
 import { T } from "../theme.js";
 
+function repoFromPath(path) {
+  if (!path) return "";
+  const parts = path.split("/").filter(Boolean);
+  return parts[parts.length - 1] || path;
+}
+
 function eventColor(type) {
   switch (type) {
     case "decision":
@@ -56,6 +62,9 @@ export function SessionReplay({
           <${Badge} color=${T.info} bg=${T.infoS}>${session.model}</${Badge}>
         </div>
         <div style=${{ fontSize: "14px", fontWeight: 600, color: T.t1, marginBottom: "8px" }}>
+          ${session.name || repoFromPath(session.repo_root) || session.goal || "No name"}
+        </div>
+        <div style=${{ fontSize: "12px", color: T.t3, marginBottom: "8px" }}>
           ${session.goal || "No goal recorded"}
         </div>
         <div style=${{ display: "flex", gap: "6px", flexWrap: "wrap" }}>
