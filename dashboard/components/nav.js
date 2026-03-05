@@ -1,7 +1,18 @@
 import { html, Badge, Dot } from "./shared.js";
 import { T } from "../theme.js";
 
-export function TopNav({ view, onViewChange, pendingCount, connection, hubVersion }) {
+export function TopNav({
+  view,
+  onViewChange,
+  pendingCount,
+  connection,
+  hubVersion,
+  workspaces = [],
+  workspaceId,
+  onWorkspaceChange,
+  orgLabel,
+  workspaceName,
+}) {
   const tab = (id, label, badge) => html`<button
     onClick=${() => onViewChange(id)}
     style=${{
@@ -23,6 +34,9 @@ export function TopNav({ view, onViewChange, pendingCount, connection, hubVersio
 
   const connColor = connection === "live" ? T.ok : connection === "connecting" ? T.warn : T.err;
   const connLabel = connection === "live" ? "live" : connection === "connecting" ? "connecting" : "reconnecting";
+  const activeWorkspace = workspaces.find((ws) => ws.id === workspaceId);
+  const workspaceLabel = workspaceName || activeWorkspace?.name || workspaceId || "default";
+  const showSwitcher = workspaces.length > 1 && onWorkspaceChange;
 
   return html`<div
     style=${{
@@ -46,6 +60,37 @@ export function TopNav({ view, onViewChange, pendingCount, connection, hubVersio
       <div>
         <div style=${{ color: T.t1, fontWeight: 600, letterSpacing: "0.06em" }}>FORGEMUX</div>
         <div style=${{ color: T.t3, fontSize: "12px" }}>Hub Dashboard</div>
+      </div>
+    </div>
+    <div style=${{ display: "flex", alignItems: "center", gap: "12px" }}>
+      <div style=${{ display: "flex", flexDirection: "column", gap: "4px" }}>
+        <div style=${{ fontSize: "10px", letterSpacing: "0.12em", color: T.t3, textTransform: "uppercase" }}>
+          ${orgLabel || "Org"}
+        </div>
+        ${showSwitcher
+          ? html`<select
+              value=${workspaceId}
+              onChange=${(event) => onWorkspaceChange(event.target.value)}
+              style=${{
+                background: T.bg2,
+                color: T.t1,
+                border: `1px solid ${T.border}`,
+                borderRadius: "8px",
+                padding: "6px 10px",
+                fontSize: "12px",
+              }}
+            >
+              ${workspaces.map((ws) => html`<option value=${ws.id}>${ws.name || ws.id}</option>`)}
+            </select>`
+          : html`<div style=${{
+              background: T.bg2,
+              color: T.t1,
+              border: `1px solid ${T.border}`,
+              borderRadius: "8px",
+              padding: "6px 10px",
+              fontSize: "12px",
+              minWidth: "120px",
+            }}>${workspaceLabel}</div>`}
       </div>
     </div>
     <div style=${{ display: "flex", gap: "20px" }}>

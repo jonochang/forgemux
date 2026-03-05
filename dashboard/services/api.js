@@ -16,8 +16,17 @@ export async function fetchJSON(path, opts = {}) {
 }
 
 export const api = {
-  sessions() {
-    return fetchJSON("/sessions");
+  sessions(workspaceId) {
+    const qs = new URLSearchParams();
+    if (workspaceId) qs.set("workspace_id", workspaceId);
+    const suffix = qs.toString();
+    return fetchJSON(`/sessions${suffix ? `?${suffix}` : ""}`);
+  },
+  workspaces() {
+    return fetchJSON("/workspaces");
+  },
+  workspace(workspaceId) {
+    return fetchJSON(`/workspaces/${encodeURIComponent(workspaceId)}`);
   },
   edges() {
     return fetchJSON("/edges");

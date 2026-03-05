@@ -25,6 +25,21 @@ function useHashRoute(defaultView = "fleet") {
   return [view, update];
 }
 
+function normalizeWorkspace(raw, fallback) {
+  if (!raw) return fallback;
+  const attention = raw.attention_budget || raw.attentionBudget || {};
+  return {
+    ...fallback,
+    ...raw,
+    org: raw.org || raw.org_id || fallback.org,
+    attentionBudget: {
+      used: attention.used || 0,
+      total: attention.total || fallback.attentionBudget?.total || 12,
+      reset_tz: attention.reset_tz || fallback.attentionBudget?.reset_tz || "UTC",
+    },
+  };
+}
+
 function App() {
   const [view, setView] = useHashRoute();
   const [sessions, setSessions] = useState([]);
@@ -44,11 +59,13 @@ function App() {
   const [replayTab, setReplayTab] = useState("diff");
   const [hotkeyAction, setHotkeyAction] = useState(null);
   const [hubVersion, setHubVersion] = useState(null);
-  const workspace = baseWorkspace;
+  const [workspaces, setWorkspaces] = useState([]);
+  const [workspaceId, setWorkspaceId] = useState(baseWorkspace.id);
+  const [workspace, setWorkspace] = useState(baseWorkspace);
 
   useEffect(() => {
     api
-      .sessions()
+      .sessions(workspaceId)
       .then((data) => {
         setSessions(data);
         setSessionsError(false);
@@ -58,7 +75,7 @@ function App() {
         setSessionsError(true);
       })
       .finally(() => setLoadingSessions(false));
-    const stop = connectWS("/sessions/ws", {
+    const stop = connectWS(`/sessions/ws?workspace_id=${encodeURIComponent(workspaceId)}`, {
       onMessage: (data) => {
         try {
           const parsed = JSON.parse(data);
@@ -70,7 +87,7 @@ function App() {
       onStatus: setConnection,
     });
     return () => stop();
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => {
     api
@@ -81,7 +98,34 @@ function App() {
 
   useEffect(() => {
     api
-      .decisions(workspace.id)
+      .workspaces()
+      .then((data) => {
+        const list = Array.isArray(data) ? data : [];
+        setWorkspaces(list);
+        if (list.length > 0) {
+          const preferred = list.find((ws) => ws.id === workspaceId) ? workspaceId : list[0].id;
+          if (preferred !== workspaceId) setWorkspaceId(preferred);
+        }
+      })
+      .catch(() => {
+        setWorkspaces([]);
+      });
+  }, []);
+
+  useEffect(() => {
+    api
+      .workspace(workspaceId)
+      .then((data) => {
+        setWorkspace(normalizeWorkspace(data, baseWorkspace));
+      })
+      .catch(() => {
+        setWorkspace(baseWorkspace);
+      });
+  }, [workspaceId]);
+
+  useEffect(() => {
+    api
+      .decisions(workspaceId)
       .then((data) => {
         setDecisions(data);
         setDecisionsError(false);
@@ -91,7 +135,7 @@ function App() {
         setDecisionsError(true);
       })
       .finally(() => setLoadingDecisions(false));
-    const stop = connectWS(`/decisions/ws?workspace_id=${encodeURIComponent(workspace.id)}`, {
+    const stop = connectWS(`/decisions/ws?workspace_id=${encodeURIComponent(workspaceId)}`, {
       onMessage: (data) => {
         try {
           const parsed = JSON.parse(data);
@@ -111,7 +155,7 @@ function App() {
       },
     });
     return () => stop();
-  }, [workspace.id]);
+  }, [workspaceId]);
 
   useEffect(() => {
     localStorage.setItem("forgemux_reviewer", reviewer);
@@ -214,6 +258,8 @@ function App() {
     setView("attach");
   };
 
+  const orgLabel = workspace.org || workspace.org_id || baseWorkspace.org;
+
   return html`<div>
     <${TopNav}
       view=${view}
@@ -221,6 +267,11 @@ function App() {
       pendingCount=${pendingCount}
       connection=${connection}
       hubVersion=${hubVersion}
+      workspaces=${workspaces}
+      workspaceId=${workspaceId}
+      onWorkspaceChange=${setWorkspaceId}
+      orgLabel=${orgLabel}
+      workspaceName=${workspace.name}
     />
     ${view === "fleet" &&
     html`<${FleetDashboard}

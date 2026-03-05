@@ -1,0 +1,21 @@
+data_dir = "./.forgemux-hub"
+edges = []
+tokens = []
+
+[organization]
+id = "org-default"
+name = "Default Org"
+
+[[workspaces]]
+id = "default"
+name = "Default Workspace"
+timezone = "UTC"
+attention_budget_total = 12
+members = ["operator"]
+
+[[workspaces.repos]]
+id = "forgemux"
+label = "Forgemux"
+icon = "hammer"
+color = "#111111"
+root = "/repos/forgemux"

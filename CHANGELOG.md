@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.22 - 2026-03-05
+
+- Add hub workspace seeding/config plus workspaces endpoints.
+- Add workspace-scoped session listing and repo-root mapping.
+- Add dashboard workspace switcher and workspace-scoped sessions/decisions.
+- Add BDD workspace scenarios, including HTTP integration coverage.
+
 ## 0.1.21 - 2026-03-05
 
 - Add configurable model probe args with timeouts to avoid hanging `forged check`.

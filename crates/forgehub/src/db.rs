@@ -1,9 +1,10 @@
 use anyhow::Context;
 use chrono::{DateTime, Datelike, NaiveDate, TimeZone, Utc};
 use chrono_tz::Tz;
+use crate::{HubConfig, OrganizationSeed, WorkspaceSeed};
 use forgemux_core::{
-    Decision, DecisionAction, DecisionContext, DecisionResolution, ReplayEvent, ReplayEventType,
-    SessionHubMeta, SessionState, Severity,
+    AttentionBudget, Decision, DecisionAction, DecisionContext, DecisionResolution, ReplayEvent,
+    ReplayEventType, SessionHubMeta, SessionState, Severity, Workspace, WorkspaceRepo,
 };
 use sqlx::FromRow;
 use sqlx::SqlitePool;
@@ -28,6 +29,70 @@ pub async fn init_db(data_dir: &Path) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
+pub async fn seed_workspaces(pool: &SqlitePool, config: &HubConfig) -> anyhow::Result<()> {
+    let org = config.organization.clone().unwrap_or(OrganizationSeed {
+        id: "org-default".to_string(),
+        name: "Default Org".to_string(),
+    });
+    insert_organization(pool, &org).await?;
+
+    let workspaces = if config.workspaces.is_empty() {
+        vec![WorkspaceSeed {
+            id: "default".to_string(),
+            name: "default".to_string(),
+            org_id: Some(org.id.clone()),
+            timezone: Some("UTC".to_string()),
+            attention_budget_total: Some(12),
+            repos: Vec::new(),
+            members: Vec::new(),
+        }]
+    } else {
+        config.workspaces.clone()
+    };
+
+    for workspace in workspaces {
+        insert_workspace(pool, &org, &workspace).await?;
+    }
+    Ok(())
+}
+
+async fn insert_organization(pool: &SqlitePool, org: &OrganizationSeed) -> anyhow::Result<()> {
+    sqlx::query("INSERT OR IGNORE INTO organizations (id, name) VALUES (?, ?)")
+        .bind(&org.id)
+        .bind(&org.name)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+async fn insert_workspace(
+    pool: &SqlitePool,
+    default_org: &OrganizationSeed,
+    workspace: &WorkspaceSeed,
+) -> anyhow::Result<()> {
+    let org_id = workspace
+        .org_id
+        .as_ref()
+        .unwrap_or(&default_org.id);
+    sqlx::query(
+        r#"
+        INSERT OR IGNORE INTO workspaces
+            (id, org_id, name, timezone, attention_budget_total, repos_json, members_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&workspace.id)
+    .bind(org_id)
+    .bind(&workspace.name)
+    .bind(workspace.timezone.as_deref().unwrap_or("UTC"))
+    .bind(workspace.attention_budget_total.unwrap_or(12) as i64)
+    .bind(serde_json::to_string(&workspace.repos)?)
+    .bind(serde_json::to_string(&workspace.members)?)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecisionStatus {
     Pending,
@@ -50,6 +115,17 @@ struct DecisionRow {
     created_at: String,
     resolved_at: Option<String>,
     resolution_json: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct WorkspaceRow {
+    id: String,
+    org_id: String,
+    name: String,
+    timezone: String,
+    attention_budget_total: i64,
+    repos_json: String,
+    members_json: String,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -171,6 +247,42 @@ pub async fn ensure_workspace(pool: &SqlitePool, workspace_id: &str) -> anyhow::
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn list_workspaces(pool: &SqlitePool) -> anyhow::Result<Vec<Workspace>> {
+    let rows = sqlx::query_as::<_, WorkspaceRow>(
+        r#"
+        SELECT id, org_id, name, timezone, attention_budget_total, repos_json, members_json
+        FROM workspaces
+        ORDER BY id
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(workspace_from_row(pool, row).await?);
+    }
+    Ok(out)
+}
+
+pub async fn get_workspace(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Workspace>> {
+    let row = sqlx::query_as::<_, WorkspaceRow>(
+        r#"
+        SELECT id, org_id, name, timezone, attention_budget_total, repos_json, members_json
+        FROM workspaces
+        WHERE id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+
+    match row {
+        Some(row) => Ok(Some(workspace_from_row(pool, row).await?)),
+        None => Ok(None),
+    }
 }
 
 pub async fn get_decision(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Decision>> {
@@ -439,6 +551,24 @@ fn decision_from_row(row: DecisionRow) -> anyhow::Result<Decision> {
         created_at,
         resolved_at,
         resolution,
+    })
+}
+
+async fn workspace_from_row(pool: &SqlitePool, row: WorkspaceRow) -> anyhow::Result<Workspace> {
+    let repos: Vec<WorkspaceRepo> = serde_json::from_str(&row.repos_json)?;
+    let members: Vec<String> = serde_json::from_str(&row.members_json)?;
+    let used = budget_used_today(pool, &row.id, &row.timezone).await.unwrap_or(0);
+    Ok(Workspace {
+        id: row.id,
+        org_id: row.org_id,
+        name: row.name,
+        repos,
+        members,
+        attention_budget: AttentionBudget {
+            used,
+            total: row.attention_budget_total as u32,
+            reset_tz: row.timezone,
+        },
     })
 }
 
