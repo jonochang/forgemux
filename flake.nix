@@ -22,7 +22,11 @@
           extensions = [ "clippy" "rustfmt" "rust-src" ];
         };
         forgemuxPkg = pkgs.callPackage ./package.nix { };
-        untanglePkg = pkgs.callPackage "${untangle}/package.nix" { };
+        untanglePkg = (pkgs.callPackage "${untangle}/package.nix" { }).overrideAttrs (_: {
+          # Build from the pinned flake input source to avoid mutable tag tarball hash drift.
+          src = untangle;
+          doCheck = false;
+        });
         cruciblePkg = pkgs.callPackage "${crucible}/package.nix" { };
         crucibleBin = pkgs.writeShellScriptBin "crucible" ''
           exec ${cruciblePkg}/bin/crucible-cli "$@"

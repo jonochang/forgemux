@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.25 - 2026-03-06
+
+- Fix `nix develop` failures caused by untangle tag hash drift by building untangle from the pinned flake input source.
+- Disable untangle package checks in the dev shell path to avoid upstream check-flag incompatibility.
+
 ## 0.1.24 - 2026-03-05
 
 - Add chromiumoxide-driven dashboard BDD coverage for model selection.

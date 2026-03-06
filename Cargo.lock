@@ -843,7 +843,7 @@ dependencies = [
 
 [[package]]
 name = "fmux"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "anyhow",
  "clap",
@@ -891,7 +891,7 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 
 [[package]]
 name = "forged"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -916,7 +916,7 @@ dependencies = [
 
 [[package]]
 name = "forgehub"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "anyhow",
  "axum",
@@ -948,7 +948,7 @@ dependencies = [
 
 [[package]]
 name = "forgemux-core"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "anyhow",
  "chrono",
