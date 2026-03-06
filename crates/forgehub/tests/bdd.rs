@@ -8,8 +8,8 @@ use chromiumoxide::{Element, Page};
 use cucumber::{World, given, then, when};
 use forgehub::{HubConfig, HubService, OrganizationSeed, WorkspaceSeed};
 use forgemux_core::{
-    AgentType, Decision, DecisionAction, DecisionContext, SessionRecord, Severity, Workspace,
-    WorkspaceRepo,
+    AgentType, Decision, DecisionAction, DecisionContext, HandoffOutcome, HandoffRecord,
+    HandoffStatus, Role, SessionRecord, Severity, Workspace, WorkspaceRepo,
 };
 use futures_util::{StreamExt, future::join_all};
 use include_dir::{Dir, include_dir};
@@ -41,6 +41,9 @@ struct HubWorld {
     last_input_payload: Option<serde_json::Value>,
     last_decisions: Vec<Decision>,
     last_decision_id: Option<String>,
+    last_handoffs: Vec<HandoffRecord>,
+    last_handoff_id: Option<String>,
+    last_http_status: Option<StatusCode>,
     hub_base_url: Option<String>,
     edge_addr: Option<String>,
     edge_sessions: Vec<SessionRecord>,
@@ -48,6 +51,8 @@ struct HubWorld {
     input_capture: Option<Arc<Mutex<Option<serde_json::Value>>>>,
     decision_capture: Option<Arc<Mutex<Option<serde_json::Value>>>>,
     dashboard_base_url: Option<String>,
+    github_api_base_url: Option<String>,
+    github_comments: Option<Arc<Mutex<Vec<String>>>>,
     browser: Option<Browser>,
     page: Option<Page>,
     browser_tempdir: Option<TempDir>,
@@ -70,9 +75,11 @@ impl std::fmt::Debug for HubWorld {
             .field("last_start_payload", &self.last_start_payload)
             .field("last_input_payload", &self.last_input_payload)
             .field("last_decision_id", &self.last_decision_id)
+            .field("last_handoff_id", &self.last_handoff_id)
             .field("hub_base_url", &self.hub_base_url)
             .field("edge_addr", &self.edge_addr)
             .field("dashboard_base_url", &self.dashboard_base_url)
+            .field("github_api_base_url", &self.github_api_base_url)
             .finish()
     }
 }
@@ -103,6 +110,11 @@ impl HubWorld {
             tokens: Vec::new(),
             organization: self.org.clone(),
             workspaces: self.workspaces.values().cloned().collect(),
+            github_api_base_url: self
+                .github_api_base_url
+                .clone()
+                .unwrap_or_else(|| "https://api.github.com".to_string()),
+            github_token: None,
         };
         self.tempdir = Some(data_dir);
         self.service = Some(Arc::new(HubService::new(config).await?));
@@ -126,6 +138,11 @@ impl HubWorld {
             .route("/decisions/:id/approve", post(decision_approve_http))
             .route("/decisions/:id/deny", post(decision_deny_http))
             .route("/decisions/:id/comment", post(decision_comment_http))
+            .route("/handoffs", get(list_handoffs_http).post(create_handoff_http))
+            .route("/handoffs/:id/claim", post(claim_handoff_http))
+            .route("/handoffs/:id/complete", post(complete_handoff_http))
+            .route("/handoffs/:id/promote", post(promote_handoff_http))
+            .route("/github/webhook", post(github_webhook_http))
             .route("/workspaces", get(list_workspaces_http))
             .route("/workspaces/:id", get(get_workspace_http))
             .route(
@@ -204,6 +221,66 @@ struct CreateDecisionRequest {
 struct DecisionActionRequest {
     reviewer: String,
     comment: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateHandoffHttpRequest {
+    role_from: Role,
+    role_to: Role,
+    session_id_from: Option<String>,
+    artifact_type: String,
+    summary: String,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    github_owner: String,
+    github_repo: String,
+    github_issue_number: u64,
+    github_pr_number: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HandoffClaimRequest {
+    claimer: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HandoffCompleteRequest {
+    completed_by: String,
+    outcome: HandoffOutcome,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct HandoffListQuery {
+    role: Option<Role>,
+    status: Option<HandoffStatus>,
+    github_owner: Option<String>,
+    github_repo: Option<String>,
+    github_issue_number: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookPayload {
+    action: Option<String>,
+    issue: Option<GithubWebhookIssue>,
+    repository: Option<GithubWebhookRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookIssue {
+    number: u64,
+    state: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookRepo {
+    name: String,
+    owner: GithubWebhookOwner,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookOwner {
+    login: String,
 }
 
 async fn list_decisions_http(
@@ -347,6 +424,111 @@ async fn session_input_http(
         }
     }
     Err(StatusCode::BAD_GATEWAY)
+}
+
+async fn list_handoffs_http(
+    State(service): State<Arc<HubService>>,
+    Query(query): Query<HandoffListQuery>,
+) -> Result<Json<Vec<HandoffRecord>>, StatusCode> {
+    match service
+        .list_handoffs(
+            query.role,
+            query.status,
+            query.github_owner.as_deref(),
+            query.github_repo.as_deref(),
+            query.github_issue_number,
+        )
+        .await
+    {
+        Ok(handoffs) => Ok(Json(handoffs)),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+async fn create_handoff_http(
+    State(service): State<Arc<HubService>>,
+    Json(req): Json<CreateHandoffHttpRequest>,
+) -> Result<Json<HandoffRecord>, StatusCode> {
+    let handoff = HandoffRecord {
+        id: String::new(),
+        role_from: req.role_from,
+        role_to: req.role_to,
+        status: HandoffStatus::Queued,
+        session_id_from: req.session_id_from,
+        artifact_type: req.artifact_type,
+        summary: req.summary,
+        acceptance_criteria: req.acceptance_criteria,
+        github_owner: req.github_owner,
+        github_repo: req.github_repo,
+        github_issue_number: req.github_issue_number,
+        github_pr_number: req.github_pr_number,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+        claimed_by: None,
+        completed_by: None,
+    };
+    match service.create_handoff(handoff).await {
+        Ok(created) => Ok(Json(created)),
+        Err(_) => Err(StatusCode::BAD_REQUEST),
+    }
+}
+
+async fn claim_handoff_http(
+    State(service): State<Arc<HubService>>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<HandoffClaimRequest>,
+) -> Result<Json<HandoffRecord>, StatusCode> {
+    match service.claim_handoff(&id, &req.claimer).await {
+        Ok(updated) => Ok(Json(updated)),
+        Err(_) => Err(StatusCode::CONFLICT),
+    }
+}
+
+async fn complete_handoff_http(
+    State(service): State<Arc<HubService>>,
+    AxumPath(id): AxumPath<String>,
+    Json(req): Json<HandoffCompleteRequest>,
+) -> Result<Json<HandoffRecord>, StatusCode> {
+    match service
+        .complete_handoff(&id, &req.completed_by, req.outcome, req.note)
+        .await
+    {
+        Ok(updated) => Ok(Json(updated)),
+        Err(_) => Err(StatusCode::CONFLICT),
+    }
+}
+
+async fn promote_handoff_http(
+    State(service): State<Arc<HubService>>,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<HandoffRecord>, StatusCode> {
+    match service.promote_handoff(&id).await {
+        Ok(updated) => Ok(Json(updated)),
+        Err(_) => Err(StatusCode::CONFLICT),
+    }
+}
+
+async fn github_webhook_http(
+    State(service): State<Arc<HubService>>,
+    Json(payload): Json<GithubWebhookPayload>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let Some(issue) = payload.issue else {
+        return Ok(Json(serde_json::json!({ "updated": 0 })));
+    };
+    let Some(repo) = payload.repository else {
+        return Ok(Json(serde_json::json!({ "updated": 0 })));
+    };
+    let is_close_event = payload.action.as_deref() == Some("closed") || issue.state == "closed";
+    if !is_close_event {
+        return Ok(Json(serde_json::json!({ "updated": 0 })));
+    }
+    match service
+        .sync_handoff_issue_state(&repo.owner.login, &repo.name, issue.number, "closed")
+        .await
+    {
+        Ok(updated) => Ok(Json(serde_json::json!({ "updated": updated }))),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
 }
 async fn list_edges_http(
     State(service): State<Arc<HubService>>,
@@ -781,6 +963,79 @@ async fn given_edge_server_accepts_decisions(
     Ok(())
 }
 
+#[given(regex = r#"^a github server has issue "([^"]+)" number (\d+)$"#)]
+async fn given_github_issue(
+    world: &mut HubWorld,
+    repo_path: String,
+    issue_number: u64,
+) -> anyhow::Result<()> {
+    let parts: Vec<_> = repo_path.split('/').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("expected owner/repo, got {repo_path}");
+    }
+    let owner = parts[0].to_string();
+    let repo = parts[1].to_string();
+    let comments = Arc::new(Mutex::new(Vec::<String>::new()));
+    let comments_post = Arc::clone(&comments);
+    let issue_route = format!("/repos/{owner}/{repo}/issues/{issue_number}");
+    let comments_route = format!("/repos/{owner}/{repo}/issues/{issue_number}/comments");
+    let edge_app = Router::new()
+        .route(
+            &issue_route,
+            get(move || async move {
+                Json(serde_json::json!({
+                    "number": issue_number,
+                    "title": "Test issue",
+                    "state": "open"
+                }))
+            }),
+        )
+        .route(
+            &comments_route,
+            post(move |Json(payload): Json<serde_json::Value>| async move {
+                if let Some(body) = payload.get("body").and_then(|v| v.as_str()) {
+                    comments_post.lock().unwrap().push(body.to_string());
+                }
+                Json(serde_json::json!({ "ok": true }))
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        axum::serve(listener, edge_app).await.unwrap();
+    });
+    world.github_api_base_url = Some(format!("http://{}", addr));
+    world.github_comments = Some(comments);
+    Ok(())
+}
+
+#[given(regex = r#"^a github server has no issue "([^"]+)" number (\d+)$"#)]
+async fn given_github_missing_issue(
+    world: &mut HubWorld,
+    repo_path: String,
+    issue_number: u64,
+) -> anyhow::Result<()> {
+    let parts: Vec<_> = repo_path.split('/').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("expected owner/repo, got {repo_path}");
+    }
+    let owner = parts[0].to_string();
+    let repo = parts[1].to_string();
+    let issue_route = format!("/repos/{owner}/{repo}/issues/{issue_number}");
+    let edge_app = Router::new().route(
+        &issue_route,
+        get(|| async { (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "not found"}))) }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        axum::serve(listener, edge_app).await.unwrap();
+    });
+    world.github_api_base_url = Some(format!("http://{}", addr));
+    world.github_comments = Some(Arc::new(Mutex::new(Vec::new())));
+    Ok(())
+}
+
 #[when(regex = r#"^I list workspaces$"#)]
 async fn when_list_workspaces(world: &mut HubWorld) -> anyhow::Result<()> {
     world.ensure_service().await?;
@@ -956,6 +1211,158 @@ async fn when_list_decisions(world: &mut HubWorld, workspace_id: String) -> anyh
         anyhow::bail!("list decisions failed: {}", resp.status());
     }
     world.last_decisions = resp.json::<Vec<Decision>>().await?;
+    Ok(())
+}
+
+#[when(
+    regex = r#"^I create handoff from "([^"]+)" to "([^"]+)" for issue "([^"]+)" number (\d+)$"#
+)]
+async fn when_create_handoff(
+    world: &mut HubWorld,
+    role_from: String,
+    role_to: String,
+    repo_path: String,
+    issue_number: u64,
+) -> anyhow::Result<()> {
+    world.ensure_hub_server().await?;
+    let parts: Vec<_> = repo_path.split('/').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("expected owner/repo, got {repo_path}");
+    }
+    let hub = world.hub_base_url.as_ref().unwrap();
+    let payload = serde_json::json!({
+        "role_from": parse_role(&role_from)?,
+        "role_to": parse_role(&role_to)?,
+        "session_id_from": "S-EDGE",
+        "artifact_type": "code_review",
+        "summary": "review implementation",
+        "acceptance_criteria": ["tests green"],
+        "github_owner": parts[0],
+        "github_repo": parts[1],
+        "github_issue_number": issue_number,
+        "github_pr_number": null
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{hub}/handoffs"))
+        .json(&payload)
+        .send()
+        .await?;
+    world.last_http_status = Some(resp.status());
+    if resp.status().is_success() {
+        let handoff = resp.json::<HandoffRecord>().await?;
+        world.last_handoff_id = Some(handoff.id.clone());
+    }
+    Ok(())
+}
+
+#[when(regex = r#"^I list handoffs for role "([^"]+)" and status "([^"]+)"$"#)]
+async fn when_list_handoffs(
+    world: &mut HubWorld,
+    role: String,
+    status: String,
+) -> anyhow::Result<()> {
+    world.ensure_hub_server().await?;
+    let hub = world.hub_base_url.as_ref().unwrap();
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(format!("{hub}/handoffs"))
+        .query(&[
+            ("role", role_to_wire(parse_role(&role)?).to_string()),
+            (
+                "status",
+                handoff_status_to_wire(parse_handoff_status(&status)?).to_string(),
+            ),
+        ])
+        .send()
+        .await?;
+    world.last_http_status = Some(resp.status());
+    world.last_handoffs = resp.json::<Vec<HandoffRecord>>().await?;
+    Ok(())
+}
+
+#[when(regex = r#"^I claim the handoff as "([^"]+)"$"#)]
+async fn when_claim_handoff(world: &mut HubWorld, claimer: String) -> anyhow::Result<()> {
+    world.ensure_hub_server().await?;
+    let hub = world.hub_base_url.as_ref().unwrap();
+    let handoff_id = world.last_handoff_id.clone().expect("handoff id missing");
+    let payload = serde_json::json!({ "claimer": claimer });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{hub}/handoffs/{handoff_id}/claim"))
+        .json(&payload)
+        .send()
+        .await?;
+    world.last_http_status = Some(resp.status());
+    Ok(())
+}
+
+#[when(regex = r#"^I complete the handoff with outcome "([^"]+)" as "([^"]+)"$"#)]
+async fn when_complete_handoff(
+    world: &mut HubWorld,
+    outcome: String,
+    actor: String,
+) -> anyhow::Result<()> {
+    world.ensure_hub_server().await?;
+    let hub = world.hub_base_url.as_ref().unwrap();
+    let handoff_id = world.last_handoff_id.clone().expect("handoff id missing");
+    let payload = serde_json::json!({
+        "completed_by": actor,
+        "outcome": parse_handoff_outcome(&outcome)?,
+        "note": "done"
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{hub}/handoffs/{handoff_id}/complete"))
+        .json(&payload)
+        .send()
+        .await?;
+    world.last_http_status = Some(resp.status());
+    Ok(())
+}
+
+#[when(regex = r#"^I promote the handoff$"#)]
+async fn when_promote_handoff(world: &mut HubWorld) -> anyhow::Result<()> {
+    world.ensure_hub_server().await?;
+    let hub = world.hub_base_url.as_ref().unwrap();
+    let handoff_id = world.last_handoff_id.clone().expect("handoff id missing");
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{hub}/handoffs/{handoff_id}/promote"))
+        .send()
+        .await?;
+    world.last_http_status = Some(resp.status());
+    if resp.status().is_success() {
+        let promoted = resp.json::<HandoffRecord>().await?;
+        world.last_handoff_id = Some(promoted.id);
+    }
+    Ok(())
+}
+
+#[when(regex = r#"^GitHub sends issue "([^"]+)" number (\d+) as closed$"#)]
+async fn when_github_closes_issue(
+    world: &mut HubWorld,
+    repo_path: String,
+    issue_number: u64,
+) -> anyhow::Result<()> {
+    world.ensure_hub_server().await?;
+    let parts: Vec<_> = repo_path.split('/').collect();
+    if parts.len() != 2 {
+        anyhow::bail!("expected owner/repo, got {repo_path}");
+    }
+    let hub = world.hub_base_url.as_ref().unwrap();
+    let payload = serde_json::json!({
+        "action": "closed",
+        "issue": { "number": issue_number, "state": "closed" },
+        "repository": { "name": parts[1], "owner": { "login": parts[0] } }
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{hub}/github/webhook"))
+        .json(&payload)
+        .send()
+        .await?;
+    world.last_http_status = Some(resp.status());
     Ok(())
 }
 
@@ -1215,6 +1622,50 @@ async fn then_edge_receives_decision_response(
     Ok(())
 }
 
+#[then(regex = r#"^the handoff request succeeds$"#)]
+async fn then_handoff_request_succeeds(world: &mut HubWorld) {
+    assert_eq!(world.last_http_status, Some(StatusCode::OK));
+}
+
+#[then(regex = r#"^the handoff request fails with bad request$"#)]
+async fn then_handoff_request_bad_request(world: &mut HubWorld) {
+    assert_eq!(world.last_http_status, Some(StatusCode::BAD_REQUEST));
+}
+
+#[then(regex = r#"^the handoff action fails with conflict$"#)]
+async fn then_handoff_action_conflict(world: &mut HubWorld) {
+    assert_eq!(world.last_http_status, Some(StatusCode::CONFLICT));
+}
+
+#[then(regex = r#"^the handoff list has (\d+) item[s]?$"#)]
+async fn then_handoff_list_count(world: &mut HubWorld, expected: usize) {
+    assert_eq!(world.last_handoffs.len(), expected);
+}
+
+#[then(regex = r#"^the latest handoff is for role "([^"]+)" with status "([^"]+)"$"#)]
+async fn then_latest_handoff_role_status(
+    world: &mut HubWorld,
+    role: String,
+    status: String,
+) -> anyhow::Result<()> {
+    let item = world.last_handoffs.first().expect("expected at least one handoff");
+    assert_eq!(role_to_wire(item.role_to), role);
+    assert_eq!(handoff_status_to_wire(item.status), status);
+    Ok(())
+}
+
+#[then(regex = r#"^github has at least (\d+) handoff comment[s]?$"#)]
+async fn then_github_has_comments(world: &mut HubWorld, minimum: usize) {
+    let comments = world
+        .github_comments
+        .as_ref()
+        .expect("github comments capture missing");
+    assert!(
+        comments.lock().unwrap().len() >= minimum,
+        "expected at least {minimum} comments"
+    );
+}
+
 #[given(regex = r#"^a hub dashboard is running$"#)]
 async fn given_hub_dashboard_running(world: &mut HubWorld) -> anyhow::Result<()> {
     world.ensure_hub_server().await?;
@@ -1286,6 +1737,58 @@ async fn then_edge_receives_start_request_agent_model(
     assert_eq!(got_agent, agent, "agent mismatch in start payload");
     assert_eq!(got_model, model, "model mismatch in start payload");
     Ok(())
+}
+
+fn parse_role(input: &str) -> anyhow::Result<Role> {
+    match input {
+        "product_manager" => Ok(Role::ProductManager),
+        "researcher" => Ok(Role::Researcher),
+        "designer" => Ok(Role::Designer),
+        "implementer" => Ok(Role::Implementer),
+        "reviewer_tester" => Ok(Role::ReviewerTester),
+        "sre" => Ok(Role::Sre),
+        _ => anyhow::bail!("unknown role: {input}"),
+    }
+}
+
+fn role_to_wire(role: Role) -> &'static str {
+    match role {
+        Role::ProductManager => "product_manager",
+        Role::Researcher => "researcher",
+        Role::Designer => "designer",
+        Role::Implementer => "implementer",
+        Role::ReviewerTester => "reviewer_tester",
+        Role::Sre => "sre",
+    }
+}
+
+fn parse_handoff_status(input: &str) -> anyhow::Result<HandoffStatus> {
+    match input {
+        "queued" => Ok(HandoffStatus::Queued),
+        "claimed" => Ok(HandoffStatus::Claimed),
+        "completed" => Ok(HandoffStatus::Completed),
+        "rejected" => Ok(HandoffStatus::Rejected),
+        "needs_attention" => Ok(HandoffStatus::NeedsAttention),
+        _ => anyhow::bail!("unknown handoff status: {input}"),
+    }
+}
+
+fn handoff_status_to_wire(status: HandoffStatus) -> &'static str {
+    match status {
+        HandoffStatus::Queued => "queued",
+        HandoffStatus::Claimed => "claimed",
+        HandoffStatus::Completed => "completed",
+        HandoffStatus::Rejected => "rejected",
+        HandoffStatus::NeedsAttention => "needs_attention",
+    }
+}
+
+fn parse_handoff_outcome(input: &str) -> anyhow::Result<HandoffOutcome> {
+    match input {
+        "approve" => Ok(HandoffOutcome::Approve),
+        "request_changes" => Ok(HandoffOutcome::RequestChanges),
+        _ => anyhow::bail!("unknown handoff outcome: {input}"),
+    }
 }
 
 #[tokio::main]
