@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use forgemux_core::{
     Decision, DecisionAction, DecisionResolution, ReplayEvent, RiskLevel, SessionHubMeta,
     SessionRecord, SessionStore, TestsStatus, Workspace, WorkspaceRepo, sort_sessions,
+    HandoffOutcome, HandoffRecord, HandoffStatus, Role, is_transition_allowed,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -15,12 +16,15 @@ use tokio::time::{Duration, interval};
 use tracing::{debug, instrument, warn};
 
 mod db;
+mod github;
 mod risk;
 use db::{
-    decision_count, ensure_workspace, get_decision, get_workspace, init_db, insert_decision,
-    insert_replay_event, list_decisions, list_replay_events, list_workspaces, log_budget_action,
-    mark_edge_sessions_unreachable, resolve_decision, seed_workspaces, upsert_session_cache,
+    decision_count, ensure_workspace, get_decision, get_handoff, get_workspace, handoff_count,
+    init_db, insert_decision, insert_handoff, insert_replay_event, list_decisions, list_handoffs,
+    list_replay_events, list_workspaces, log_budget_action, mark_edge_sessions_unreachable,
+    resolve_decision, seed_workspaces, update_handoff, upsert_session_cache,
 };
+use github::GitHubClient;
 use risk::compute_risk;
 
 pub use db::DecisionStatus;
@@ -50,6 +54,10 @@ pub struct HubConfig {
     pub organization: Option<OrganizationSeed>,
     #[serde(default)]
     pub workspaces: Vec<WorkspaceSeed>,
+    #[serde(default = "default_github_api_base_url")]
+    pub github_api_base_url: String,
+    #[serde(default)]
+    pub github_token: Option<String>,
 }
 
 impl HubConfig {
@@ -58,6 +66,10 @@ impl HubConfig {
         let cfg = toml::from_str(&data)?;
         Ok(cfg)
     }
+}
+
+fn default_github_api_base_url() -> String {
+    "https://api.github.com".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,9 +108,11 @@ pub struct HubService {
     issued_tokens: Arc<Mutex<HashMap<String, DateTime<Utc>>>>,
     decision_tx: broadcast::Sender<DecisionEvent>,
     decision_counter: Arc<Mutex<u64>>,
+    handoff_counter: Arc<Mutex<u64>>,
     edge_failures: Arc<Mutex<HashMap<String, u8>>>,
     workspace_roots: Vec<WorkspaceRoots>,
     default_workspace_id: String,
+    github: Option<GitHubClient>,
     #[allow(dead_code)]
     db: SqlitePool,
 }
@@ -110,7 +124,16 @@ impl HubService {
         seed_workspaces(&db, &config).await?;
         let (decision_tx, _) = broadcast::channel(100);
         let counter = decision_count(&db).await?;
+        let handoffs = handoff_count(&db).await?;
         let (workspace_roots, default_workspace_id) = workspace_roots_from_config(&config);
+        let github = if config.github_api_base_url.is_empty() {
+            None
+        } else {
+            Some(GitHubClient::new(
+                config.github_api_base_url.clone(),
+                config.github_token.clone(),
+            ))
+        };
         Ok(Self {
             config,
             registry: Arc::new(Mutex::new(HashMap::new())),
@@ -119,9 +142,11 @@ impl HubService {
             issued_tokens: Arc::new(Mutex::new(HashMap::new())),
             decision_tx,
             decision_counter: Arc::new(Mutex::new(counter)),
+            handoff_counter: Arc::new(Mutex::new(handoffs)),
             edge_failures: Arc::new(Mutex::new(HashMap::new())),
             workspace_roots,
             default_workspace_id,
+            github,
             db,
         })
     }
@@ -492,10 +517,240 @@ impl HubService {
         Ok((events, next_cursor))
     }
 
+    #[instrument(skip(self))]
+    pub async fn create_handoff(&self, mut handoff: HandoffRecord) -> anyhow::Result<HandoffRecord> {
+        if !is_transition_allowed(handoff.role_from, handoff.role_to) {
+            anyhow::bail!(
+                "invalid role transition: {:?} -> {:?}",
+                handoff.role_from,
+                handoff.role_to
+            );
+        }
+        if !matches!(handoff.status, HandoffStatus::Queued) {
+            anyhow::bail!("handoff must start in queued status");
+        }
+        if let Some(github) = &self.github {
+            let issue = github
+                .get_issue(
+                    &handoff.github_owner,
+                    &handoff.github_repo,
+                    handoff.github_issue_number,
+                )
+                .await?;
+            let Some(issue) = issue else {
+                anyhow::bail!("github issue not found");
+            };
+            if issue.state == "closed" {
+                anyhow::bail!("github issue is closed");
+            }
+        }
+        if handoff.id.is_empty() {
+            handoff.id = self.next_handoff_id();
+        }
+        let now = Utc::now();
+        handoff.created_at = now;
+        handoff.updated_at = now;
+        insert_handoff(&self.db, &handoff).await?;
+        Ok(handoff)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn list_handoffs(
+        &self,
+        role: Option<Role>,
+        status: Option<HandoffStatus>,
+        github_owner: Option<&str>,
+        github_repo: Option<&str>,
+        github_issue_number: Option<u64>,
+    ) -> anyhow::Result<Vec<HandoffRecord>> {
+        list_handoffs(
+            &self.db,
+            role,
+            status,
+            github_owner,
+            github_repo,
+            github_issue_number,
+        )
+        .await
+    }
+
+    #[instrument(skip(self))]
+    pub async fn claim_handoff(&self, handoff_id: &str, claimer: &str) -> anyhow::Result<HandoffRecord> {
+        let mut handoff = get_handoff(&self.db, handoff_id)
+            .await?
+            .with_context(|| format!("handoff not found: {handoff_id}"))?;
+        if !matches!(handoff.status, HandoffStatus::Queued) {
+            anyhow::bail!("handoff is not claimable");
+        }
+        handoff.status = HandoffStatus::Claimed;
+        handoff.claimed_by = Some(claimer.to_string());
+        handoff.updated_at = Utc::now();
+        update_handoff(&self.db, &handoff).await?;
+        self.github_comment(
+            &handoff,
+            format!("handoff {} claimed by {}", handoff.id, claimer),
+        )
+        .await?;
+        Ok(handoff)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn complete_handoff(
+        &self,
+        handoff_id: &str,
+        completed_by: &str,
+        outcome: HandoffOutcome,
+        note: Option<String>,
+    ) -> anyhow::Result<HandoffRecord> {
+        let mut handoff = get_handoff(&self.db, handoff_id)
+            .await?
+            .with_context(|| format!("handoff not found: {handoff_id}"))?;
+        if !matches!(handoff.status, HandoffStatus::Claimed) {
+            anyhow::bail!("handoff must be claimed before completion");
+        }
+        handoff.status = match outcome {
+            HandoffOutcome::Approve => HandoffStatus::Completed,
+            HandoffOutcome::RequestChanges => HandoffStatus::Rejected,
+        };
+        handoff.completed_by = Some(completed_by.to_string());
+        handoff.updated_at = Utc::now();
+        update_handoff(&self.db, &handoff).await?;
+        let suffix = note.unwrap_or_default();
+        self.github_comment(
+            &handoff,
+            format!(
+                "handoff {} completed by {} with {:?}. {}",
+                handoff.id, completed_by, outcome, suffix
+            ),
+        )
+        .await?;
+
+        if handoff.role_to == Role::ReviewerTester && matches!(outcome, HandoffOutcome::RequestChanges)
+        {
+            let follow_up = HandoffRecord {
+                id: String::new(),
+                role_from: Role::ReviewerTester,
+                role_to: Role::Implementer,
+                status: HandoffStatus::Queued,
+                session_id_from: handoff.session_id_from.clone(),
+                artifact_type: handoff.artifact_type.clone(),
+                summary: format!("changes requested for {}", handoff.id),
+                acceptance_criteria: handoff.acceptance_criteria.clone(),
+                github_owner: handoff.github_owner.clone(),
+                github_repo: handoff.github_repo.clone(),
+                github_issue_number: handoff.github_issue_number,
+                github_pr_number: handoff.github_pr_number,
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                claimed_by: None,
+                completed_by: None,
+            };
+            let _ = self.create_handoff(follow_up).await?;
+        }
+        Ok(handoff)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn promote_handoff(&self, handoff_id: &str) -> anyhow::Result<HandoffRecord> {
+        let handoff = get_handoff(&self.db, handoff_id)
+            .await?
+            .with_context(|| format!("handoff not found: {handoff_id}"))?;
+        if !matches!(handoff.status, HandoffStatus::Completed) {
+            anyhow::bail!("only completed handoffs can be promoted");
+        }
+        let next_role = next_role(handoff.role_to)
+            .with_context(|| format!("no next role for {:?}", handoff.role_to))?;
+        let promoted = HandoffRecord {
+            id: String::new(),
+            role_from: handoff.role_to,
+            role_to: next_role,
+            status: HandoffStatus::Queued,
+            session_id_from: handoff.session_id_from.clone(),
+            artifact_type: handoff.artifact_type.clone(),
+            summary: format!("promoted from {}", handoff.id),
+            acceptance_criteria: handoff.acceptance_criteria.clone(),
+            github_owner: handoff.github_owner.clone(),
+            github_repo: handoff.github_repo.clone(),
+            github_issue_number: handoff.github_issue_number,
+            github_pr_number: handoff.github_pr_number,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            claimed_by: None,
+            completed_by: None,
+        };
+        let promoted = self.create_handoff(promoted).await?;
+        self.github_comment(
+            &promoted,
+            format!("handoff {} promoted to {:?}", promoted.id, promoted.role_to),
+        )
+        .await?;
+        Ok(promoted)
+    }
+
+    #[instrument(skip(self))]
+    pub async fn sync_handoff_issue_state(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        state: &str,
+    ) -> anyhow::Result<u64> {
+        let mut updated = 0_u64;
+        let mut items = list_handoffs(
+            &self.db,
+            None,
+            None,
+            Some(owner),
+            Some(repo),
+            Some(issue_number),
+        )
+        .await?;
+        for handoff in &mut items {
+            if state == "closed" && !matches!(handoff.status, HandoffStatus::Completed) {
+                handoff.status = HandoffStatus::NeedsAttention;
+                handoff.updated_at = Utc::now();
+                update_handoff(&self.db, handoff).await?;
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
+    async fn github_comment(&self, handoff: &HandoffRecord, message: String) -> anyhow::Result<()> {
+        if let Some(github) = &self.github {
+            github
+                .post_issue_comment(
+                    &handoff.github_owner,
+                    &handoff.github_repo,
+                    handoff.github_issue_number,
+                    &message,
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
     fn next_decision_id(&self) -> String {
         let mut guard = self.decision_counter.lock().unwrap();
         *guard += 1;
         format!("D-{:04}", *guard)
+    }
+
+    fn next_handoff_id(&self) -> String {
+        let mut guard = self.handoff_counter.lock().unwrap();
+        *guard += 1;
+        format!("H-{:04}", *guard)
+    }
+}
+
+fn next_role(role: Role) -> Option<Role> {
+    match role {
+        Role::ProductManager => Some(Role::Researcher),
+        Role::Researcher => Some(Role::Designer),
+        Role::Designer => Some(Role::Implementer),
+        Role::Implementer => Some(Role::ReviewerTester),
+        Role::ReviewerTester => Some(Role::Sre),
+        Role::Sre => None,
     }
 }
 
@@ -607,6 +862,8 @@ mod tests {
             tokens: Vec::new(),
             organization: None,
             workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
         })
         .await
         .unwrap();
@@ -625,6 +882,8 @@ mod tests {
             tokens: Vec::new(),
             organization: None,
             workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
         })
         .await
         .unwrap();
@@ -646,6 +905,8 @@ mod tests {
             tokens: Vec::new(),
             organization: None,
             workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
         })
         .await
         .unwrap();
@@ -681,6 +942,8 @@ mod tests {
             tokens: Vec::new(),
             organization: None,
             workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
         })
         .await
         .unwrap();

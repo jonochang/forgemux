@@ -372,6 +372,45 @@ The following details are fully abstracted away from the engineer.
 
 ---
 
+## Scenario I — Role Workflow + GitHub Handoffs
+
+### I1. Product or implementer creates a handoff linked to a GitHub issue
+
+User creates a handoff from one role queue to another (`implementer -> reviewer_tester`) and links `owner/repo#issue`.
+
+Expected behaviour:
+- Handoff creation succeeds only if the GitHub issue exists.
+- Handoff enters `queued` in the target role queue.
+- Queue card shows linked issue and deep link target.
+
+### I2. Reviewer claims a handoff with lock semantics
+
+Two reviewers try to claim the same queued handoff.
+
+Expected behaviour:
+- First claim succeeds and transitions `queued -> claimed`.
+- Second claim fails with conflict and no state mutation.
+
+### I3. Reviewer completion paths
+
+When a claimed review handoff is completed:
+- `approve` marks the current handoff complete and allows promote to `sre` queue.
+- `request_changes` creates a new queued handoff back to `implementer`.
+
+### I4. GitHub synchronization updates queue state
+
+When GitHub signals that the linked issue is closed:
+- Linked non-completed handoffs transition to `needs_attention`.
+- Dashboard queue highlights these items for triage.
+
+### I5. GitHub write-back audit trail
+
+On claim, complete, and promote actions:
+- Forgemux posts issue comments summarizing role action and actor.
+- The issue timeline acts as external audit context for cross-session handoffs.
+
+---
+
 ## Alignment with Design Principles
 
 | Principle | How These Scenarios Demonstrate It |
