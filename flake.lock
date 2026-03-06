@@ -245,15 +245,16 @@
         "rust-overlay": "rust-overlay_3"
       },
       "locked": {
-        "lastModified": 1772666081,
-        "narHash": "sha256-9xnCIy9V0v7a2s7mkqVgqgBrT2DOo5esCB1iDFJCuLs=",
+        "lastModified": 1772787091,
+        "narHash": "sha256-LJxGMJsCvZqHEqGoKOQZTw4c5ypIHzAOFeuWEQR8TaQ=",
         "owner": "jonochang",
         "repo": "untangle",
-        "rev": "c91f0a7e8a650718b3fdf11febae0f85982b4be4",
+        "rev": "1928bd891910aed9ef54736396d9bac2f5b09ef0",
         "type": "github"
       },
       "original": {
         "owner": "jonochang",
+        "ref": "v0.3.2",
         "repo": "untangle",
         "type": "github"
       }

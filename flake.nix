@@ -8,7 +8,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     flake-utils.url = "github:numtide/flake-utils";
-    untangle.url = "github:jonochang/untangle";
+    untangle.url = "github:jonochang/untangle/v0.3.2";
     crucible.url = "github:jonochang/crucible";
   };
 
@@ -22,11 +22,7 @@
           extensions = [ "clippy" "rustfmt" "rust-src" ];
         };
         forgemuxPkg = pkgs.callPackage ./package.nix { };
-        untanglePkg = (pkgs.callPackage "${untangle}/package.nix" { }).overrideAttrs (_: {
-          # Build from the pinned flake input source to avoid mutable tag tarball hash drift.
-          src = untangle;
-          doCheck = false;
-        });
+        untanglePkg = pkgs.callPackage "${untangle}/package.nix" { };
         cruciblePkg = pkgs.callPackage "${crucible}/package.nix" { };
         crucibleBin = pkgs.writeShellScriptBin "crucible" ''
           exec ${cruciblePkg}/bin/crucible-cli "$@"
