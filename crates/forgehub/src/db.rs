@@ -5,6 +5,7 @@ use chrono_tz::Tz;
 use forgemux_core::{
     AttentionBudget, Decision, DecisionAction, DecisionContext, DecisionResolution, ReplayEvent,
     ReplayEventType, SessionHubMeta, SessionState, Severity, Workspace, WorkspaceRepo,
+    HandoffRecord, HandoffStatus, Role,
 };
 use sqlx::FromRow;
 use sqlx::SqlitePool;
@@ -138,6 +139,26 @@ struct ReplayEventRow {
     payload: Option<String>,
 }
 
+#[derive(Debug, Clone, FromRow)]
+struct HandoffRow {
+    id: String,
+    role_from: String,
+    role_to: String,
+    status: String,
+    session_id_from: Option<String>,
+    artifact_type: String,
+    summary: String,
+    acceptance_json: String,
+    github_owner: String,
+    github_repo: String,
+    github_issue_number: i64,
+    github_pr_number: Option<i64>,
+    created_at: String,
+    updated_at: String,
+    claimed_by: Option<String>,
+    completed_by: Option<String>,
+}
+
 pub async fn insert_decision(pool: &SqlitePool, decision: &Decision) -> anyhow::Result<()> {
     sqlx::query(
         r#"
@@ -244,6 +265,127 @@ pub async fn ensure_workspace(pool: &SqlitePool, workspace_id: &str) -> anyhow::
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn handoff_count(pool: &SqlitePool) -> anyhow::Result<u64> {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM handoffs")
+        .fetch_one(pool)
+        .await?;
+    Ok(count.0 as u64)
+}
+
+pub async fn insert_handoff(pool: &SqlitePool, handoff: &HandoffRecord) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO handoffs (
+            id, role_from, role_to, status, session_id_from, artifact_type, summary,
+            acceptance_json, github_owner, github_repo, github_issue_number, github_pr_number,
+            created_at, updated_at, claimed_by, completed_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&handoff.id)
+    .bind(role_to_str(handoff.role_from))
+    .bind(role_to_str(handoff.role_to))
+    .bind(handoff_status_to_str(handoff.status))
+    .bind(&handoff.session_id_from)
+    .bind(&handoff.artifact_type)
+    .bind(&handoff.summary)
+    .bind(serde_json::to_string(&handoff.acceptance_criteria)?)
+    .bind(&handoff.github_owner)
+    .bind(&handoff.github_repo)
+    .bind(handoff.github_issue_number as i64)
+    .bind(handoff.github_pr_number.map(|n| n as i64))
+    .bind(handoff.created_at.to_rfc3339())
+    .bind(handoff.updated_at.to_rfc3339())
+    .bind(&handoff.claimed_by)
+    .bind(&handoff.completed_by)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn get_handoff(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<HandoffRecord>> {
+    let row = sqlx::query_as::<_, HandoffRow>(
+        r#"
+        SELECT
+            id, role_from, role_to, status, session_id_from, artifact_type, summary,
+            acceptance_json, github_owner, github_repo, github_issue_number, github_pr_number,
+            created_at, updated_at, claimed_by, completed_by
+        FROM handoffs
+        WHERE id = ?
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(handoff_from_row).transpose()
+}
+
+pub async fn update_handoff(pool: &SqlitePool, handoff: &HandoffRecord) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE handoffs
+        SET
+            role_from = ?, role_to = ?, status = ?, session_id_from = ?, artifact_type = ?,
+            summary = ?, acceptance_json = ?, github_owner = ?, github_repo = ?,
+            github_issue_number = ?, github_pr_number = ?, created_at = ?, updated_at = ?,
+            claimed_by = ?, completed_by = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(role_to_str(handoff.role_from))
+    .bind(role_to_str(handoff.role_to))
+    .bind(handoff_status_to_str(handoff.status))
+    .bind(&handoff.session_id_from)
+    .bind(&handoff.artifact_type)
+    .bind(&handoff.summary)
+    .bind(serde_json::to_string(&handoff.acceptance_criteria)?)
+    .bind(&handoff.github_owner)
+    .bind(&handoff.github_repo)
+    .bind(handoff.github_issue_number as i64)
+    .bind(handoff.github_pr_number.map(|n| n as i64))
+    .bind(handoff.created_at.to_rfc3339())
+    .bind(handoff.updated_at.to_rfc3339())
+    .bind(&handoff.claimed_by)
+    .bind(&handoff.completed_by)
+    .bind(&handoff.id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_handoffs(
+    pool: &SqlitePool,
+    role: Option<Role>,
+    status: Option<HandoffStatus>,
+    github_owner: Option<&str>,
+    github_repo: Option<&str>,
+    github_issue_number: Option<u64>,
+) -> anyhow::Result<Vec<HandoffRecord>> {
+    let rows = sqlx::query_as::<_, HandoffRow>(
+        r#"
+        SELECT
+            id, role_from, role_to, status, session_id_from, artifact_type, summary,
+            acceptance_json, github_owner, github_repo, github_issue_number, github_pr_number,
+            created_at, updated_at, claimed_by, completed_by
+        FROM handoffs
+        WHERE (?1 IS NULL OR role_to = ?1)
+          AND (?2 IS NULL OR status = ?2)
+          AND (?3 IS NULL OR github_owner = ?3)
+          AND (?4 IS NULL OR github_repo = ?4)
+          AND (?5 IS NULL OR github_issue_number = ?5)
+        ORDER BY updated_at DESC
+        "#,
+    )
+    .bind(role.map(role_to_str))
+    .bind(status.map(handoff_status_to_str))
+    .bind(github_owner)
+    .bind(github_repo)
+    .bind(github_issue_number.map(|n| n as i64))
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(handoff_from_row).collect()
 }
 
 pub async fn list_workspaces(pool: &SqlitePool) -> anyhow::Result<Vec<Workspace>> {
@@ -631,6 +773,71 @@ fn replay_type_from_str(raw: &str) -> ReplayEventType {
         "decision" => ReplayEventType::Decision,
         _ => ReplayEventType::System,
     }
+}
+
+fn role_to_str(role: Role) -> &'static str {
+    match role {
+        Role::ProductManager => "product_manager",
+        Role::Researcher => "researcher",
+        Role::Designer => "designer",
+        Role::Implementer => "implementer",
+        Role::ReviewerTester => "reviewer_tester",
+        Role::Sre => "sre",
+    }
+}
+
+fn role_from_str(raw: &str) -> anyhow::Result<Role> {
+    match raw {
+        "product_manager" => Ok(Role::ProductManager),
+        "researcher" => Ok(Role::Researcher),
+        "designer" => Ok(Role::Designer),
+        "implementer" => Ok(Role::Implementer),
+        "reviewer_tester" => Ok(Role::ReviewerTester),
+        "sre" => Ok(Role::Sre),
+        _ => anyhow::bail!("unknown role: {raw}"),
+    }
+}
+
+fn handoff_status_to_str(status: HandoffStatus) -> &'static str {
+    match status {
+        HandoffStatus::Queued => "queued",
+        HandoffStatus::Claimed => "claimed",
+        HandoffStatus::Completed => "completed",
+        HandoffStatus::Rejected => "rejected",
+        HandoffStatus::NeedsAttention => "needs_attention",
+    }
+}
+
+fn handoff_status_from_str(raw: &str) -> anyhow::Result<HandoffStatus> {
+    match raw {
+        "queued" => Ok(HandoffStatus::Queued),
+        "claimed" => Ok(HandoffStatus::Claimed),
+        "completed" => Ok(HandoffStatus::Completed),
+        "rejected" => Ok(HandoffStatus::Rejected),
+        "needs_attention" => Ok(HandoffStatus::NeedsAttention),
+        _ => anyhow::bail!("unknown handoff status: {raw}"),
+    }
+}
+
+fn handoff_from_row(row: HandoffRow) -> anyhow::Result<HandoffRecord> {
+    Ok(HandoffRecord {
+        id: row.id,
+        role_from: role_from_str(&row.role_from)?,
+        role_to: role_from_str(&row.role_to)?,
+        status: handoff_status_from_str(&row.status)?,
+        session_id_from: row.session_id_from,
+        artifact_type: row.artifact_type,
+        summary: row.summary,
+        acceptance_criteria: serde_json::from_str(&row.acceptance_json)?,
+        github_owner: row.github_owner,
+        github_repo: row.github_repo,
+        github_issue_number: row.github_issue_number as u64,
+        github_pr_number: row.github_pr_number.map(|n| n as u64),
+        created_at: DateTime::parse_from_rfc3339(&row.created_at)?.with_timezone(&Utc),
+        updated_at: DateTime::parse_from_rfc3339(&row.updated_at)?.with_timezone(&Utc),
+        claimed_by: row.claimed_by,
+        completed_by: row.completed_by,
+    })
 }
 
 fn decision_action_to_str(action: DecisionAction) -> &'static str {

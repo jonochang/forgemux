@@ -12,7 +12,10 @@ use axum::{
 use chrono::Utc;
 use clap::{Parser, Subcommand};
 use forgehub::{DecisionEvent, DecisionStatus, HubConfig, HubEdge, HubService};
-use forgemux_core::{Decision, DecisionAction, DecisionContext, Severity};
+use forgemux_core::{
+    Decision, DecisionAction, DecisionContext, HandoffOutcome, HandoffRecord, HandoffStatus, Role,
+    Severity,
+};
 use futures_util::{SinkExt, StreamExt, future::join_all};
 use include_dir::{Dir, include_dir};
 use mime_guess::MimeGuess;
@@ -92,6 +95,8 @@ fn main() -> anyhow::Result<()> {
             tokens: Vec::new(),
             organization: None,
             workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
         }
     };
     let rt = tokio::runtime::Runtime::new()?;
@@ -142,6 +147,11 @@ fn main() -> anyhow::Result<()> {
                 .route("/decisions/:id/approve", post(decision_approve))
                 .route("/decisions/:id/deny", post(decision_deny))
                 .route("/decisions/:id/comment", post(decision_comment))
+                .route("/handoffs", get(list_handoffs).post(create_handoff))
+                .route("/handoffs/:id/claim", post(claim_handoff))
+                .route("/handoffs/:id/complete", post(complete_handoff))
+                .route("/handoffs/:id/promote", post(promote_handoff))
+                .route("/github/webhook", post(github_webhook))
                 .route("/sessions/ws", get(ws_sessions))
                 .route("/sessions/:id/stop", post(stop_session))
                 .route("/sessions/:id/kill", post(kill_session))
@@ -296,6 +306,8 @@ fn run_configure(
         },
         organization: None,
         workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
     };
 
     write_config_file(&cli.config, &config, force, dry_run)?;
@@ -478,6 +490,67 @@ struct DecisionActionRequest {
     comment: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct HandoffsQuery {
+    role: Option<Role>,
+    status: Option<HandoffStatus>,
+    github_owner: Option<String>,
+    github_repo: Option<String>,
+    github_issue_number: Option<u64>,
+    token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateHandoffRequest {
+    role_from: Role,
+    role_to: Role,
+    session_id_from: Option<String>,
+    artifact_type: String,
+    summary: String,
+    #[serde(default)]
+    acceptance_criteria: Vec<String>,
+    github_owner: String,
+    github_repo: String,
+    github_issue_number: u64,
+    github_pr_number: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClaimHandoffRequest {
+    claimer: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompleteHandoffRequest {
+    completed_by: String,
+    outcome: HandoffOutcome,
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookPayload {
+    action: Option<String>,
+    issue: Option<GithubWebhookIssue>,
+    repository: Option<GithubWebhookRepo>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookIssue {
+    number: u64,
+    state: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookRepo {
+    name: String,
+    owner: GithubWebhookOwner,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubWebhookOwner {
+    login: String,
+}
+
 async fn list_decisions(
     State(service): State<Arc<HubService>>,
     headers: HeaderMap,
@@ -540,6 +613,201 @@ async fn list_workspaces(
             Json(serde_json::json!({ "error": err.to_string() })),
         )
             .into_response(),
+    }
+}
+
+async fn list_handoffs(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Query(query): Query<HandoffsQuery>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, query.token.as_deref()) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service
+        .list_handoffs(
+            query.role,
+            query.status,
+            query.github_owner.as_deref(),
+            query.github_repo.as_deref(),
+            query.github_issue_number,
+        )
+        .await
+    {
+        Ok(handoffs) => (axum::http::StatusCode::OK, Json(handoffs)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn create_handoff(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    Json(req): Json<CreateHandoffRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    let handoff = HandoffRecord {
+        id: String::new(),
+        role_from: req.role_from,
+        role_to: req.role_to,
+        status: HandoffStatus::Queued,
+        session_id_from: req.session_id_from,
+        artifact_type: req.artifact_type,
+        summary: req.summary,
+        acceptance_criteria: req.acceptance_criteria,
+        github_owner: req.github_owner,
+        github_repo: req.github_repo,
+        github_issue_number: req.github_issue_number,
+        github_pr_number: req.github_pr_number,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+        claimed_by: None,
+        completed_by: None,
+    };
+    match service.create_handoff(handoff).await {
+        Ok(created) => (axum::http::StatusCode::OK, Json(created)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn claim_handoff(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<ClaimHandoffRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service.claim_handoff(&id, &req.claimer).await {
+        Ok(updated) => (axum::http::StatusCode::OK, Json(updated)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn complete_handoff(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(req): Json<CompleteHandoffRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service
+        .complete_handoff(&id, &req.completed_by, req.outcome, req.note)
+        .await
+    {
+        Ok(updated) => (axum::http::StatusCode::OK, Json(updated)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn promote_handoff(
+    State(service): State<Arc<HubService>>,
+    headers: HeaderMap,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
+    if let Some(resp) = check_version(&headers) {
+        return resp;
+    }
+    if !authorized(&service, &headers, None) {
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    match service.promote_handoff(&id).await {
+        Ok(promoted) => (axum::http::StatusCode::OK, Json(promoted)).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+async fn github_webhook(
+    State(service): State<Arc<HubService>>,
+    Json(payload): Json<GithubWebhookPayload>,
+) -> impl IntoResponse {
+    let Some(issue) = payload.issue else {
+        return (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({ "updated": 0 })),
+        );
+    };
+    let Some(repo) = payload.repository else {
+        return (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({ "updated": 0 })),
+        );
+    };
+    let is_close_event = payload.action.as_deref() == Some("closed") || issue.state == "closed";
+    if !is_close_event {
+        return (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({ "updated": 0 })),
+        );
+    }
+    match service
+        .sync_handoff_issue_state(&repo.owner.login, &repo.name, issue.number, "closed")
+        .await
+    {
+        Ok(updated) => (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({ "updated": updated })),
+        ),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err.to_string() })),
+        ),
     }
 }
 
@@ -1819,6 +2087,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -1882,6 +2152,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -1998,6 +2270,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2043,6 +2317,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2091,6 +2367,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2137,6 +2415,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2187,6 +2467,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2280,6 +2562,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2357,6 +2641,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2428,6 +2714,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2492,6 +2780,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2560,6 +2850,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2629,6 +2921,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2660,6 +2954,8 @@ mod tests {
                 tokens: Vec::new(),
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),
@@ -2691,6 +2987,8 @@ mod tests {
                 tokens: vec!["secret".to_string()],
                 organization: None,
                 workspaces: Vec::new(),
+            github_api_base_url: "https://api.github.com".to_string(),
+            github_token: None,
             })
             .await
             .unwrap(),

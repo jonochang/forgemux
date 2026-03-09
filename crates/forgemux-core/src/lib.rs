@@ -1,4 +1,5 @@
 pub mod decision;
+pub mod handoff;
 pub mod meta;
 pub mod replay;
 pub mod repo;
@@ -8,6 +9,7 @@ pub mod state;
 pub mod workspace;
 
 pub use decision::*;
+pub use handoff::*;
 pub use meta::*;
 pub use replay::*;
 pub use repo::*;
