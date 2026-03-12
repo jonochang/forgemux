@@ -18,8 +18,9 @@ mod db;
 mod risk;
 use db::{
     decision_count, ensure_workspace, get_decision, get_workspace, init_db, insert_decision,
-    insert_replay_event, list_decisions, list_replay_events, list_workspaces, log_budget_action,
-    mark_edge_sessions_unreachable, resolve_decision, seed_workspaces, upsert_session_cache,
+    insert_replay_event, latest_replay_event, list_decisions, list_replay_events, list_workspaces,
+    log_budget_action, mark_edge_sessions_unreachable, resolve_decision, seed_workspaces,
+    upsert_session_cache,
 };
 use risk::compute_risk;
 
@@ -490,6 +491,14 @@ impl HubService {
             None
         };
         Ok((events, next_cursor))
+    }
+
+    #[instrument(skip(self))]
+    pub async fn latest_replay_event(
+        &self,
+        session_id: &str,
+    ) -> anyhow::Result<Option<ReplayEvent>> {
+        latest_replay_event(&self.db, session_id).await
     }
 
     fn next_decision_id(&self) -> String {
