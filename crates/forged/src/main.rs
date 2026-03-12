@@ -2,8 +2,11 @@ use clap::{Parser, Subcommand};
 use forged::{ForgedConfig, OsCommandRunner, SessionService};
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
+use tracing::{debug, warn};
 
 #[derive(Debug, Parser)]
 #[command(name = "forged")]
@@ -120,28 +123,14 @@ fn main() -> anyhow::Result<()> {
             let _ = service.cleanup_orphan_sessions();
             if let Some((hub_url, node_id, advertise_addr)) = hub_info {
                 thread::spawn(move || {
-                    let client = reqwest::blocking::Client::new();
-                    let register_url = format!("{}/edges/register", hub_url.trim_end_matches('/'));
-                    let mut register_req = client.post(register_url).json(&serde_json::json!({
-                        "id": node_id,
-                        "addr": advertise_addr,
-                    }));
-                    if let Some(token) = &hub_token {
-                        register_req = register_req.bearer_auth(token);
-                    }
-                    let _ = register_req.send();
-                    let heartbeat_url =
-                        format!("{}/edges/heartbeat", hub_url.trim_end_matches('/'));
-                    loop {
-                        let mut heartbeat_req = client
-                            .post(&heartbeat_url)
-                            .json(&serde_json::json!({ "id": node_id }));
-                        if let Some(token) = &hub_token {
-                            heartbeat_req = heartbeat_req.bearer_auth(token);
-                        }
-                        let _ = heartbeat_req.send();
-                        thread::sleep(Duration::from_secs(10));
-                    }
+                    hub_sync_loop(
+                        hub_url,
+                        node_id,
+                        advertise_addr,
+                        hub_token,
+                        Duration::from_secs(10),
+                        None,
+                    )
                 });
             }
             let app = forged::server::build_router(std::sync::Arc::new(service));
@@ -191,6 +180,99 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn hub_sync_loop(
+    hub_url: String,
+    node_id: String,
+    advertise_addr: String,
+    hub_token: Option<String>,
+    interval: Duration,
+    stop: Option<Arc<AtomicBool>>,
+) {
+    let client = reqwest::blocking::Client::new();
+    let mut registered = false;
+    loop {
+        if stop
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            break;
+        }
+
+        if !registered {
+            registered = try_register(
+                &client,
+                &hub_url,
+                &node_id,
+                &advertise_addr,
+                hub_token.as_deref(),
+            );
+        }
+
+        if registered && !try_heartbeat(&client, &hub_url, &node_id, hub_token.as_deref()) {
+            registered = false;
+        }
+
+        thread::sleep(interval);
+    }
+}
+
+fn try_register(
+    client: &reqwest::blocking::Client,
+    hub_url: &str,
+    node_id: &str,
+    advertise_addr: &str,
+    hub_token: Option<&str>,
+) -> bool {
+    let register_url = format!("{}/edges/register", hub_url.trim_end_matches('/'));
+    let mut register_req = client.post(register_url).json(&serde_json::json!({
+        "id": node_id,
+        "addr": advertise_addr,
+    }));
+    if let Some(token) = hub_token {
+        register_req = register_req.bearer_auth(token);
+    }
+    match register_req.send() {
+        Ok(resp) if resp.status().is_success() => {
+            debug!(%node_id, "registered with hub");
+            true
+        }
+        Ok(resp) => {
+            warn!(%node_id, status = %resp.status(), "hub register failed");
+            false
+        }
+        Err(err) => {
+            warn!(%node_id, error = %err, "hub register request failed");
+            false
+        }
+    }
+}
+
+fn try_heartbeat(
+    client: &reqwest::blocking::Client,
+    hub_url: &str,
+    node_id: &str,
+    hub_token: Option<&str>,
+) -> bool {
+    let heartbeat_url = format!("{}/edges/heartbeat", hub_url.trim_end_matches('/'));
+    let mut heartbeat_req = client
+        .post(&heartbeat_url)
+        .json(&serde_json::json!({ "id": node_id }));
+    if let Some(token) = hub_token {
+        heartbeat_req = heartbeat_req.bearer_auth(token);
+    }
+    match heartbeat_req.send() {
+        Ok(resp) if resp.status().is_success() => true,
+        Ok(resp) => {
+            warn!(%node_id, status = %resp.status(), "hub heartbeat failed");
+            false
+        }
+        Err(err) => {
+            warn!(%node_id, error = %err, "hub heartbeat request failed");
+            false
+        }
+    }
 }
 
 #[derive(serde::Serialize)]
@@ -349,4 +431,159 @@ fn write_config_file<T: serde::Serialize>(
     }
     std::fs::write(path, body)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde::Deserialize;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct HubTestState {
+        register_calls: AtomicUsize,
+        heartbeat_calls: AtomicUsize,
+        fail_heartbeat_once: AtomicBool,
+    }
+
+    #[derive(Deserialize)]
+    struct RegisterPayload {
+        id: String,
+        addr: String,
+    }
+
+    #[derive(Deserialize)]
+    struct HeartbeatPayload {
+        id: String,
+    }
+
+    async fn register_edge_test(
+        State(state): State<Arc<HubTestState>>,
+        Json(payload): Json<RegisterPayload>,
+    ) -> StatusCode {
+        assert!(!payload.id.is_empty());
+        assert!(!payload.addr.is_empty());
+        state.register_calls.fetch_add(1, Ordering::Relaxed);
+        StatusCode::OK
+    }
+
+    async fn heartbeat_test(
+        State(state): State<Arc<HubTestState>>,
+        Json(payload): Json<HeartbeatPayload>,
+    ) -> StatusCode {
+        assert!(!payload.id.is_empty());
+        state.heartbeat_calls.fetch_add(1, Ordering::Relaxed);
+        if state.fail_heartbeat_once.swap(false, Ordering::Relaxed) {
+            StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            StatusCode::OK
+        }
+    }
+
+    #[test]
+    fn hub_sync_retries_register_until_hub_available() {
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = std_listener.local_addr().unwrap();
+        drop(std_listener);
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_worker = Arc::clone(&stop);
+        let hub_url = format!("http://{addr}");
+        let worker = thread::spawn(move || {
+            hub_sync_loop(
+                hub_url,
+                "edge-01".to_string(),
+                "127.0.0.1:9090".to_string(),
+                None,
+                Duration::from_millis(50),
+                Some(stop_worker),
+            );
+        });
+
+        thread::sleep(Duration::from_millis(150));
+
+        let state = Arc::new(HubTestState::default());
+        let state_for_server = Arc::clone(&state);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let app = Router::new()
+                    .route("/edges/register", post(register_edge_test))
+                    .route("/edges/heartbeat", post(heartbeat_test))
+                    .with_state(state_for_server);
+                let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+        });
+
+        thread::sleep(Duration::from_millis(300));
+        stop.store(true, Ordering::Relaxed);
+        let _ = shutdown_tx.send(());
+        worker.join().unwrap();
+        server.join().unwrap();
+
+        assert!(state.register_calls.load(Ordering::Relaxed) >= 1);
+        assert!(state.heartbeat_calls.load(Ordering::Relaxed) >= 1);
+    }
+
+    #[test]
+    fn hub_sync_reregisters_after_heartbeat_failure() {
+        let state = Arc::new(HubTestState::default());
+        state.fail_heartbeat_once.store(true, Ordering::Relaxed);
+
+        let state_for_server = Arc::clone(&state);
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel::<SocketAddr>();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            rt.block_on(async move {
+                let app = Router::new()
+                    .route("/edges/register", post(register_edge_test))
+                    .route("/edges/heartbeat", post(heartbeat_test))
+                    .with_state(state_for_server);
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                addr_tx.send(listener.local_addr().unwrap()).unwrap();
+                axum::serve(listener, app)
+                    .with_graceful_shutdown(async {
+                        let _ = shutdown_rx.await;
+                    })
+                    .await
+                    .unwrap();
+            });
+        });
+
+        let addr = addr_rx.recv().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_worker = Arc::clone(&stop);
+        let worker = thread::spawn(move || {
+            hub_sync_loop(
+                format!("http://{addr}"),
+                "edge-01".to_string(),
+                "127.0.0.1:9090".to_string(),
+                None,
+                Duration::from_millis(50),
+                Some(stop_worker),
+            );
+        });
+
+        thread::sleep(Duration::from_millis(350));
+        stop.store(true, Ordering::Relaxed);
+        let _ = shutdown_tx.send(());
+        worker.join().unwrap();
+        server.join().unwrap();
+
+        assert!(state.register_calls.load(Ordering::Relaxed) >= 2);
+        assert!(state.heartbeat_calls.load(Ordering::Relaxed) >= 1);
+    }
 }
